@@ -1,1 +1,1 @@
-# Authenticated-secure-medical-image-transmission-using-hqc-and-ascon
+# Authenticated-secure-medical-image-transmission-using-pqc-and-ascon
