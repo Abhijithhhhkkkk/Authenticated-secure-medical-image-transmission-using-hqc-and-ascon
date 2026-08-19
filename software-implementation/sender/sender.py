@@ -2,6 +2,7 @@
 import csv 
 import os
 from pathlib import Path
+import socket
 
 from watchdog.observers import Observer
 from ascon import encrypt
@@ -10,6 +11,14 @@ import time
 # ----------------------------
 # SANITIZE PATIENT NAME
 # ----------------------------
+HOST = input("Enter receiver IP address: ").strip()
+PORT = 5000
+
+SOCKET_TIMEOUT = 10
+READY_TIMEOUT = 20
+READY_STABLE_CHECKS = 4
+READY_SLEEP = 0.3
+
 WATCH_FOLDER = Path(
     "/home/abhijithk/Authenticated-secure-medical-image-transmission-using-hqc-and-ascon/sender/img"
 )
@@ -129,6 +138,15 @@ def build_secure_payload(
         + image_bytes
     )
 
+def build_encryption_packet(ascon_key, nonce, ciphertext):
+    packet = (
+        len(ascon_key).to_bytes(2, "big") +      # Encrypted key length
+        ascon_key +                              # HQC/RSA encrypted ASCON key
+        nonce +                                # 16-byte nonce
+        len(ciphertext).to_bytes(4, "big") +   # Ciphertext length
+        ciphertext                             # Encrypted payload
+    )
+    return packet
 
 # ----------------------------
 # SEND IMAGE
@@ -173,3 +191,31 @@ def send_image(path: Path) -> None:
 
     ascon_end = time.perf_counter()
     ascon_time = ascon_end - ascon_start
+    # Create encryption packet
+    packet = build_encryption_packet(
+        ascon_key,
+        nonce,
+        ciphertext
+    )
+    # -----------------------------------
+# TCP TRANSMISSION
+# -----------------------------------
+    tx_start = time.perf_counter()
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
+        client.settimeout(SOCKET_TIMEOUT)
+        client.connect((HOST, PORT))
+
+        # Send total packet size first
+        client.sendall(len(packet).to_bytes(8, "big"))
+
+        # Send the encrypted packet
+        client.sendall(packet)
+
+    tx_end = time.perf_counter()
+    transmission_time = tx_end - tx_start
+
+    print(f"Packet sent successfully: {len(packet)} bytes")
+    # ----------------------------
+# BUILD ENCRYPTION PACKET
+# ----------------------------
