@@ -508,7 +508,9 @@ These can be evaluated when deploying to FPGA hardware.
 
 ## License
 
-[Specify license: MIT, Apache 2.0, etc.]
+This project is licensed under the **MIT License**.
+
+You are free to use, modify, and distribute the software in accordance with the terms of the license.
 
 ---
 
