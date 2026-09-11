@@ -514,7 +514,11 @@ These can be evaluated when deploying to FPGA hardware.
 
 ## References
 
-1. **HQC Key Encapsulation Mechanism (KEM)** — NIST Post-Quantum Cryptography resources and HQC specification.  
+1. **Hamming Quasi-Cyclic (HQC) — Key Encapsulation Mechanism**  
+   HQC Specification:  
+   https://www.pqc-hqc.org/doc/hqc-specification_2020-05-29.pdf
+
+2. **NIST Post-Quantum Cryptography — HQC**  
    https://csrc.nist.gov/projects/post-quantum-cryptography
 
 2. **Ascon-128 AEAD** — Ascon authenticated encryption specification.  
