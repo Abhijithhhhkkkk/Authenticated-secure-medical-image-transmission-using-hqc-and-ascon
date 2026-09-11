@@ -501,8 +501,8 @@ These can be evaluated when deploying to FPGA hardware.
 
 **Project:** Authenticated Secure Medical Image Transmission Using HQC and Ascon  
 **Course:** Final Year Electronics and Communication Engineering Project  
-**Institution:** [Your University Name]  
-**Academic Year:** [Year]  
+**Institution:** GCE KANNUR
+**Academic Year:** 2023-2027
 
 ---
 
