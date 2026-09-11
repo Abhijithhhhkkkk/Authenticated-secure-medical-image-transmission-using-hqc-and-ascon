@@ -1,4 +1,4 @@
-# Post-Quantum Cryptographic Framework for Secure Medical Image Transmission
+# Authenticated Secure Medical Image Transmission Using HQC and Ascon
 
 <p align="center">
   <b>Authentication • HQC KEM • ASCON • FPGA Acceleration • Secure Medical Imaging</b>
