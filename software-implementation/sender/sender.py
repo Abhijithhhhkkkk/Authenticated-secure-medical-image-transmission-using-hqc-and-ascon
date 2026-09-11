@@ -31,10 +31,7 @@ AAD = b"medical-image"
 # IMAGE FOLDER
 # ============================================================
 
-IMAGE_FOLDER = Path(
-    "/home/abhijithk/Authenticated-secure-medical-image-transmission-using-hqc-and-ascon/"
-    "software-implementation/sender/img"
-)
+IMAGE_FOLDER = Path(__file__).resolve().parent / "img"
 
 IMAGE_EXTENSIONS = {
     ".jpg",
@@ -1312,8 +1309,4 @@ def main():
 
 if __name__ == "__main__":
 
-<<<<<<< HEAD
     main()
-=======
-    main()
->>>>>>> 0287f06 (added multiple tcp connection)
