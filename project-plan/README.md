@@ -1,8 +1,7 @@
 
 # Project Plan
 
-## Post-Quantum Cryptographic Framework for Secure Medical Image Transmission
-
+## Authenticated Secure Medical Image Transmission Using HQC and Ascon
 This document defines the development roadmap for the project, covering
 software implementation, secure communication, FPGA acceleration, hardware
 integration, performance evaluation, and final documentation.
