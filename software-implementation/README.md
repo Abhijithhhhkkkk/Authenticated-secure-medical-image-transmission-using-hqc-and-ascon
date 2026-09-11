@@ -32,16 +32,15 @@ Sender → Select Image → Select Receiver → Authentication Challenge
 
 ## Key Objectives
 
-✅ Secure medical image transmission over TCP/IP  
-✅ Receiver authentication before key exchange  
-✅ Protection against unauthorized access  
-✅ Post-quantum secure key establishment using HQC  
-✅ Confidentiality & integrity via Ascon-128 AEAD  
-✅ Challenge-response authentication with replay resistance  
-✅ Performance measurement of cryptographic operations  
-✅ Support for multiple receivers  
-✅ Session key derivation without direct transmission  
-
+- Secure medical image transmission over TCP/IP
+- Receiver authentication before key exchange
+- Protection against unauthorized access
+- Post-quantum secure key establishment using HQC
+- Confidentiality and integrity using Ascon-128 AEAD
+- Challenge-response authentication with replay resistance
+- Performance measurement of cryptographic operations
+- Support for multiple receivers
+- Session key derivation without direct transmission
 ---
 
 ## System Architecture
@@ -96,8 +95,8 @@ hmac.compare_digest(received_hmac, expected_hmac)
 ```
 
 **Authentication Result:**
-- ✅ **Match** → Proceed to HQC key exchange
-- ❌ **Mismatch** → Abort; do not send medical image
+-  **Match** → Proceed to HQC key exchange
+- **Mismatch** → Abort; do not send medical image
 
 **Security Features:**
 - Fresh random challenge for every session (prevents replay attacks)
@@ -161,7 +160,7 @@ Ciphertext + Authentication Tag
 │ Authentication Tag                  │
 └─────────────────────────────────────┘
 
-⚠️  ASCON Session Key is NOT included
+  ASCON Session Key is NOT included
 ```
 
 ---
@@ -255,7 +254,7 @@ Sender:    RECEIVER1_KEY=receiver1-secret-key-123456
 Receiver 1: RECEIVER_SECRET=receiver1-secret-key-123456
 ```
 
-⚠️ **Security Note:** Never commit `.env` files to version control. Add to `.gitignore`:
+ **Security Note:** Never commit `.env` files to version control. Add to `.gitignore`:
 ```
 .env
 *.env
@@ -446,10 +445,10 @@ SENDER                          RECEIVER
 
 This software implementation focuses on **cryptographic and network-security aspects**. The following are outside the scope:
 
-- ❌ FPGA resource utilization analysis
-- ❌ Hardware power consumption measurement
-- ❌ Hardware clock frequency analysis
-- ❌ FPGA throughput optimization
+- FPGA resource utilization analysis
+-  Hardware power consumption measurement
+-  Hardware clock frequency analysis
+- FPGA throughput optimization
 
 These can be evaluated when deploying to FPGA hardware.
 
@@ -457,22 +456,22 @@ These can be evaluated when deploying to FPGA hardware.
 
 ## Future Enhancements
 
-- 🔧 FPGA acceleration for HQC and Ascon
-- 📊 Hardware resource utilization analysis
-- ⚡ Power consumption measurement
-- 🖼️ Support for additional medical image formats (JPEG-XR, WebP)
-- 📦 Multi-image transmission in single session
-- 🔐 Enhanced key management infrastructure (PKI)
-- 📝 Secure logging and audit trails
-- 🏥 DICOM medical image standard integration
-- 🌐 Network optimization and compression
-- 🔀 Comparison with classical cryptographic schemes (RSA, ECDH)
+- FPGA acceleration for HQC and Ascon
+- Hardware resource utilization analysis
+  - Power consumption measurement
+- Support for additional medical image formats (JPEG-XR, WebP)
+-  Multi-image transmission in single session
+- Enhanced key management infrastructure (PKI)
+- Secure logging and audit trails
+- DICOM medical image standard integration
+-  Network optimization and compression
+- Comparison with classical cryptographic schemes (RSA, ECDH)
 
 ---
 
 ## Important Security Notes
 
-⚠️ **Critical Reminders:**
+**Critical Reminders:**
 
 1. **Never hard-code secrets** in source code
 2. **Always use environment variables** via `.env` files
