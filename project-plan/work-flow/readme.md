@@ -1,4 +1,4 @@
-# Secure Medical Image Transmission Workflow
+# Authenticated Secure Medical Image Transmission Using HQC and Ascon Workflow
 
 ## Post-Quantum Cryptographic Framework
 
