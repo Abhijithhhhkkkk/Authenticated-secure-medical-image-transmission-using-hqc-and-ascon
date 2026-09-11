@@ -514,14 +514,20 @@ These can be evaluated when deploying to FPGA hardware.
 
 ## References
 
-- HQC Key Encapsulation Mechanism: [Link to specification]
-- Ascon-128 AEAD: [Link to specification]
-- Open Quantum Safe (liboqs): https://github.com/open-quantum-safe/liboqs
-- HMAC-SHA256: RFC 2104
-- Python Cryptography: https://cryptography.io/
+1. **HQC Key Encapsulation Mechanism (KEM)** — NIST Post-Quantum Cryptography resources and HQC specification.  
+   https://csrc.nist.gov/projects/post-quantum-cryptography
 
----
+2. **Ascon-128 AEAD** — Ascon authenticated encryption specification.  
+   https://ascon.iaik.tugraz.at/
 
+3. **Open Quantum Safe (liboqs)** — Open-source library for quantum-safe cryptographic algorithms.  
+   https://github.com/open-quantum-safe/liboqs
+
+4. **HMAC-SHA256** — RFC 2104, *HMAC: Keyed-Hashing for Message Authentication*.  
+   https://www.rfc-editor.org/rfc/rfc2104.html
+
+5. **liboqs-python** — Python bindings for the Open Quantum Safe library.  
+   https://github.com/open-quantum-safe/liboqs-python
 ## Support & Questions
-
-For questions or issues, please refer to the project repository or contact the project maintainers.
+For questions, issues, or technical assistance, please refer to the project repository or contact the project maintainer:
+📧 Email: abhijithk20052@gmail.com
