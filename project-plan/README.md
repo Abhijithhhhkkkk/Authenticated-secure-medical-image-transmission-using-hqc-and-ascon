@@ -13,11 +13,11 @@ integration, performance evaluation, and final documentation.
 
 | Phase | Module | Major Deliverables |
 |---|---|---|
-| 1 | Requirement Analysis | Literature survey and technology study |
-| 2 | Authentication | User and receiver authentication |
-| 3 | HQC KEM | Key generation, encapsulation, decapsulation |
-| 4 | ASCON | Image encryption and decryption |
-| 5 | Secure Communication | TCP/IP and multi-receiver transmission |
+| 1 ✅| Requirement Analysis | Literature survey and technology study |
+| 2 ✅| Authentication | User and receiver authentication |
+| 3|  HQC KEM | Key generation, encapsulation, decapsulation |
+| 4 ✅| ASCON | Image encryption and decryption |
+| 5 ✅| Secure Communication | TCP/IP and multi-receiver transmission |
 | 6 | FPGA Acceleration | FPGA symmetric-encryption implementation |
 | 7 | HQC Hardware | FPGA-based HQC integration |
 | 8 | Complete Framework | Hardware cryptographic framework |
