@@ -1312,4 +1312,8 @@ def main():
 
 if __name__ == "__main__":
 
+<<<<<<< HEAD
     main()
+=======
+    main()
+>>>>>>> 0287f06 (added multiple tcp connection)
