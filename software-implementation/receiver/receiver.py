@@ -1,5 +1,6 @@
 import socket
 import struct
+import secrets
 import hmac
 import hashlib
 import csv
@@ -8,7 +9,9 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from ascon import decrypt
+from ascon import encrypt
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 
 
 # ============================================================
@@ -17,72 +20,59 @@ from ascon import decrypt
 
 load_dotenv()
 
+TCP_PORT = int(os.getenv("TCP_PORT", "5000"))
+SOCKET_TIMEOUT = 15
+AAD = b"medical-image"
+
+
+# ============================================================
+# IMAGE FOLDER
+# ============================================================
+
+IMAGE_FOLDER = Path(__file__).resolve().parent / "img"
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+
 
 # ============================================================
 # RECEIVER CONFIGURATION
 # ============================================================
 
-RECEIVER_ID = os.getenv(
-    "RECEIVER_ID",
-    "receiver1"
-)
-
-TCP_HOST = os.getenv(
-    "TCP_HOST",
-    "0.0.0.0"
-)
-
-TCP_PORT = int(
-    os.getenv(
-        "TCP_PORT",
-        "5000"
-    )
-)
-
-RECEIVER_KEY = os.getenv(
-    "RECEIVER_KEY",
-    ""
-).encode()
+RECEIVERS = {
+    "receiver1": {
+        "ip": os.getenv("RECEIVER1_IP"),
+        "key": os.getenv("RECEIVER1_KEY", "").encode()
+    },
+    "receiver2": {
+        "ip": os.getenv("RECEIVER2_IP"),
+        "key": os.getenv("RECEIVER2_KEY", "").encode()
+    },
+    "receiver3": {
+        "ip": os.getenv("RECEIVER3_IP"),
+        "key": os.getenv("RECEIVER3_KEY", "").encode()
+    }
+}
 
 
 # ============================================================
-# CONFIGURATION
+# HMAC CONFIGURATION
 # ============================================================
-
-SOCKET_TIMEOUT = 30
-
-AAD = b"medical-image"
 
 HMAC_SIZE = 32
 CHALLENGE_SIZE = 32
-
-MAX_PACKET_SIZE = 100 * 1024 * 1024
-
-
-# ============================================================
-# OUTPUT FOLDER
-# ============================================================
-
-RECEIVED_FOLDER = Path(
-    "received_images"
-)
 
 
 # ============================================================
 # PERFORMANCE CSV
 # ============================================================
 
-CSV_FILE = Path(
-    "performance_log_receiver.csv"
-)
+CSV_FILE = Path("performance_log_sender.csv")
 
 CSV_FIELDS = [
     "Receiver_ID",
     "Filename",
-    "Patient",
     "ImageSizeKB",
-    "Decryption_Time",
-    "Reception_Time",
+    "ASCON_Time",
+    "Transmission_Time",
     "Overall_Delay",
     "Throughput_KBps"
 ]
@@ -93,51 +83,21 @@ CSV_FIELDS = [
 # ============================================================
 
 def validate_configuration():
-
-    if not RECEIVER_KEY:
-
-        raise ValueError(
-            "RECEIVER_KEY missing in .env"
-        )
-
-    if len(RECEIVER_KEY) == 0:
-
-        raise ValueError(
-            "Receiver HMAC key cannot be empty."
-        )
+    for receiver_id, config in RECEIVERS.items():
+        if not config["ip"]:
+            raise ValueError(f"{receiver_id} IP missing in .env")
+        if not config["key"]:
+            raise ValueError(f"{receiver_id} key missing in .env")
 
 
 # ============================================================
-# INITIALIZE DIRECTORIES
-# ============================================================
-
-def initialize_directories():
-
-    RECEIVED_FOLDER.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-
-# ============================================================
-# INITIALIZE CSV
+# CSV INITIALIZATION
 # ============================================================
 
 def initialize_csv():
-
     if not CSV_FILE.exists():
-
-        with open(
-            CSV_FILE,
-            "w",
-            newline=""
-        ) as file:
-
-            writer = csv.DictWriter(
-                file,
-                fieldnames=CSV_FIELDS
-            )
-
+        with open(CSV_FILE, "w", newline="") as file:
+            writer = csv.DictWriter(file, fieldnames=CSV_FIELDS)
             writer.writeheader()
 
 
@@ -145,25 +105,13 @@ def initialize_csv():
 # RECEIVE EXACT NUMBER OF BYTES
 # ============================================================
 
-def recv_exact(
-    sock,
-    size
-):
-
+def recv_exact(sock, size):
     data = b""
-
     while len(data) < size:
-
-        chunk = sock.recv(
-            size - len(data)
-        )
-
+        chunk = sock.recv(size - len(data))
         if not chunk:
-
             return None
-
         data += chunk
-
     return data
 
 
@@ -171,1176 +119,458 @@ def recv_exact(
 # HMAC
 # ============================================================
 
-def calculate_hmac(
-    key,
-    data
-):
-
-    return hmac.new(
-        key,
-        data,
-        hashlib.sha256
-    ).digest()
+def calculate_hmac(key, data):
+    return hmac.new(key, data, hashlib.sha256).digest()
 
 
 # ============================================================
-# AUTHENTICATE SENDER
+# AUTHENTICATE RECEIVER
 # ============================================================
 
-def authenticate_sender(
-    sock
-):
-
-    authentication_start = (
-        time.perf_counter()
-    )
+def authenticate_receiver(sock, receiver_id, receiver_key):
+    authentication_start = time.perf_counter()
 
     # --------------------------------------------------------
-    # Receive authentication request
-    #
-    # Sender sends:
-    #
-    # A + 32-byte challenge
+    # Generate random challenge
     # --------------------------------------------------------
+    challenge = secrets.token_bytes(CHALLENGE_SIZE)
 
-    request_type = recv_exact(
-        sock,
-        1
-    )
+    # --------------------------------------------------------
+    # Send authentication request: A + challenge
+    # --------------------------------------------------------
+    sock.sendall(b"A" + challenge)
+    print("Challenge sent.")
 
-    if request_type != b"A":
-
-        print(
-            "Invalid authentication request."
-        )
-
+    # --------------------------------------------------------
+    # Receive response type
+    # --------------------------------------------------------
+    response_type = recv_exact(sock, 1)
+    if response_type != b"R":
+        print("Invalid authentication response.")
         return False
 
-    challenge = recv_exact(
-        sock,
-        CHALLENGE_SIZE
-    )
-
-    if challenge is None:
-
-        print(
-            "Challenge not received."
-        )
-
+    # --------------------------------------------------------
+    # Receive HMAC
+    # --------------------------------------------------------
+    received_hmac = recv_exact(sock, HMAC_SIZE)
+    if received_hmac is None:
+        print("HMAC response not received.")
         return False
 
-    print(
-        "\nChallenge received."
-    )
+    # --------------------------------------------------------
+    # Calculate expected HMAC
+    # --------------------------------------------------------
+    authentication_data = challenge + receiver_id.encode()
+    expected_hmac = calculate_hmac(receiver_key, authentication_data)
 
     # --------------------------------------------------------
-    # Calculate HMAC
-    #
-    # HMAC(
-    #     Receiver_Key,
-    #     Challenge + Receiver_ID
-    # )
+    # Verify HMAC
     # --------------------------------------------------------
-
-    authentication_data = (
-        challenge
-        + RECEIVER_ID.encode()
-    )
-
-    response_hmac = calculate_hmac(
-        RECEIVER_KEY,
-        authentication_data
-    )
-
-    # --------------------------------------------------------
-    # Send response
-    #
-    # R + HMAC
-    # --------------------------------------------------------
-
-    sock.sendall(
-        b"R"
-        + response_hmac
-    )
-
-    # --------------------------------------------------------
-    # Receive authentication result
-    # --------------------------------------------------------
-
-    result = recv_exact(
-        sock,
-        1
-    )
-
-    if result != b"O":
-
-        print(
-            "\nAuthentication rejected by sender."
-        )
-
+    if not hmac.compare_digest(received_hmac, expected_hmac):
+        print("\nHMAC verification FAILED.")
+        sock.sendall(b"F")
         return False
 
-    authentication_time = (
-        time.perf_counter()
-        - authentication_start
+    authentication_time = time.perf_counter() - authentication_start
+
+    print("\nHMAC verification SUCCESSFUL.")
+    print(f"Receiver ID          : {receiver_id}")
+    print(f"Authentication time  : {authentication_time:.6f} sec")
+
+    # --------------------------------------------------------
+    # Authentication successful
+    # --------------------------------------------------------
+    sock.sendall(b"O")
+    return True
+
+
+# ============================================================
+# BUILD IMAGE PAYLOAD
+# ============================================================
+
+def build_image_payload(image_path):
+    filename = image_path.name
+
+    patient_name = input(f"Enter patient name for {filename}: ").strip()
+    if not patient_name:
+        patient_name = "unknown_patient"
+
+    patient_bytes = patient_name.encode()
+    filename_bytes = filename.encode()
+    image_data = image_path.read_bytes()
+
+    # --------------------------------------------------------
+    # Payload format:
+    # [patient length:2][patient][filename length:2][filename][image data]
+    # --------------------------------------------------------
+    payload = (
+        struct.pack("!H", len(patient_bytes)) + patient_bytes
+        + struct.pack("!H", len(filename_bytes)) + filename_bytes
+        + image_data
     )
 
-    print(
-        "\n============================================"
+    return payload, patient_name
+
+
+# ============================================================
+# ASCON ENCRYPTION
+# ============================================================
+
+def encrypt_image(image_path):
+    payload, patient_name = build_image_payload(image_path)
+
+    # Fresh ASCON-128 key and nonce for every message
+    ascon_key = secrets.token_bytes(16)
+    nonce = secrets.token_bytes(16)
+
+    start_time = time.perf_counter()
+    ciphertext = encrypt(ascon_key, nonce, AAD, payload)
+    encryption_time = time.perf_counter() - start_time
+
+    return ascon_key, nonce, ciphertext, patient_name, encryption_time
+
+
+# ============================================================
+# BUILD SECURE PACKET
+# ============================================================
+
+def build_secure_packet(ascon_key, nonce, ciphertext):
+    # --------------------------------------------------------
+    # Packet format:
+    # [key length:1][key][nonce:16][ciphertext length:4][ciphertext]
+    # --------------------------------------------------------
+    packet = (
+        struct.pack("!B", len(ascon_key)) + ascon_key
+        + nonce
+        + struct.pack("!I", len(ciphertext)) + ciphertext
     )
 
-    print(
-        "AUTHENTICATION SUCCESSFUL"
-    )
+    return packet
 
-    print(
-        "============================================"
-    )
 
-    print(
-        f"Receiver ID         : {RECEIVER_ID}"
-    )
+# ============================================================
+# SEND MEDICAL IMAGE
+# ============================================================
 
-    print(
-        f"Authentication time : "
-        f"{authentication_time:.6f} sec"
-    )
+def send_image(sock, receiver_id, image_path):
+    try:
+        print("\n============================================")
+        print("ASCON ENCRYPTION")
+        print("============================================")
 
-    print(
-        "============================================"
-    )
+        ascon_key, nonce, ciphertext, patient_name, encryption_time = encrypt_image(
+            image_path
+        )
+
+        packet = build_secure_packet(ascon_key, nonce, ciphertext)
+
+        # Tell receiver an image is coming, then its length, then the packet
+        sock.sendall(b"I")
+        sock.sendall(struct.pack("!Q", len(packet)))
+
+        transmission_start = time.perf_counter()
+        sock.sendall(packet)
+        transmission_time = time.perf_counter() - transmission_start
+
+        # --------------------------------------------------------
+        # Performance calculation
+        # --------------------------------------------------------
+        image_size_kb = image_path.stat().st_size / 1024
+        overall_delay = encryption_time + transmission_time
+        throughput = (
+            image_size_kb / transmission_time if transmission_time > 0 else 0
+        )
+
+        # --------------------------------------------------------
+        # Save performance data
+        # --------------------------------------------------------
+        initialize_csv()
+        with open(CSV_FILE, "a", newline="") as file:
+            writer = csv.DictWriter(file, fieldnames=CSV_FIELDS)
+            writer.writerow({
+                "Receiver_ID": receiver_id,
+                "Filename": image_path.name,
+                "ImageSizeKB": f"{image_size_kb:.2f}",
+                "ASCON_Time": f"{encryption_time:.6f}",
+                "Transmission_Time": f"{transmission_time:.6f}",
+                "Overall_Delay": f"{overall_delay:.6f}",
+                "Throughput_KBps": f"{throughput:.2f}"
+            })
+
+        # --------------------------------------------------------
+        # Display result
+        # --------------------------------------------------------
+        print("\n============================================")
+        print("MEDICAL IMAGE SENT")
+        print("============================================")
+        print(f"Receiver        : {receiver_id}")
+        print(f"Patient         : {patient_name}")
+        print(f"Filename        : {image_path.name}")
+        print(f"Image size      : {image_size_kb:.2f} KB")
+        print(f"ASCON time      : {encryption_time:.6f} sec")
+        print(f"Transmission    : {transmission_time:.6f} sec")
+        print(f"Overall delay   : {overall_delay:.6f} sec")
+        print(f"Throughput      : {throughput:.2f} KB/s")
+        print("============================================")
+
+        return True
+
+    except Exception as e:
+        print(f"\nImage transmission error: {e}")
+        return False
+
+
+# ============================================================
+# SEND TO REQUIRED RECEIVER
+# ============================================================
+
+def send_to_required_receiver(image_path, required_receiver):
+    receiver_config = RECEIVERS[required_receiver]
+    receiver_ip = receiver_config["ip"]
+    receiver_key = receiver_config["key"]
+
+    print("\n============================================")
+    print("CONNECTING TO REQUIRED RECEIVER")
+    print("============================================")
+    print(f"Receiver ID : {required_receiver}")
+    print(f"Receiver IP : {receiver_ip}")
+    print(f"TCP Port    : {TCP_PORT}")
+
+    sock = None
+
+    try:
+        # --------------------------------------------------------
+        # Create TCP socket and connect
+        # --------------------------------------------------------
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(SOCKET_TIMEOUT)
+        sock.connect((receiver_ip, TCP_PORT))
+        print("\nTCP connection established.")
+
+        # --------------------------------------------------------
+        # Authenticate receiver
+        # --------------------------------------------------------
+        authenticated = authenticate_receiver(sock, required_receiver, receiver_key)
+
+        if not authenticated:
+            print("\nReceiver authentication failed.")
+            print("Medical image NOT sent.")
+            return False
+
+        # --------------------------------------------------------
+        # Send image
+        # --------------------------------------------------------
+        return send_image(sock, required_receiver, image_path)
+
+    except socket.timeout:
+        print("\nConnection timed out.")
+        return False
+
+    except ConnectionRefusedError:
+        print("\nConnection refused.")
+        print("Make sure the receiver is running.")
+        return False
+
+    except OSError as e:
+        print(f"\nNetwork error: {e}")
+        return False
+
+    except Exception as e:
+        print(f"\nError: {e}")
+        return False
+
+    finally:
+        if sock is not None:
+            sock.close()
+            print("\nTCP connection closed.")
+
+
+# ============================================================
+# WAIT UNTIL FILE IS COMPLETELY WRITTEN
+# ============================================================
+
+def wait_for_file_ready(image_path):
+    previous_size = -1
+    stable_count = 0
+
+    while stable_count < 3:
+        try:
+            current_size = image_path.stat().st_size
+        except FileNotFoundError:
+            return False
+
+        if current_size == previous_size:
+            stable_count += 1
+        else:
+            stable_count = 0
+
+        previous_size = current_size
+        time.sleep(0.5)
 
     return True
 
 
 # ============================================================
-# RECEIVE SECURE PACKET
+# WATCHDOG HANDLER
 # ============================================================
 
-def receive_secure_packet(
-    sock
-):
+class MedicalImageHandler(FileSystemEventHandler):
+
+    def __init__(self, receiver_id):
+        super().__init__()
+        self.receiver_id = receiver_id
+        self.processing = set()
 
     # --------------------------------------------------------
-    # Receive message type
-    #
-    # I = image
+    # Process image
     # --------------------------------------------------------
+    def process_image(self, image_path):
+        image_path = Path(image_path)
 
-    message_type = recv_exact(
-        sock,
-        1
-    )
-
-    if message_type != b"I":
-
-        print(
-            "Invalid message type."
-        )
-
-        return None
-
-    # --------------------------------------------------------
-    # Receive packet length
-    #
-    # 8-byte unsigned integer
-    # --------------------------------------------------------
-
-    packet_length_data = recv_exact(
-        sock,
-        8
-    )
-
-    if packet_length_data is None:
-
-        print(
-            "Packet length not received."
-        )
-
-        return None
-
-    packet_length = struct.unpack(
-        "!Q",
-        packet_length_data
-    )[0]
-
-    print(
-        f"\nEncrypted packet size : "
-        f"{packet_length} bytes"
-    )
-
-    # --------------------------------------------------------
-    # Security check
-    # --------------------------------------------------------
-
-    if packet_length <= 0:
-
-        print(
-            "Invalid packet size."
-        )
-
-        return None
-
-    if packet_length > MAX_PACKET_SIZE:
-
-        print(
-            "Packet exceeds maximum allowed size."
-        )
-
-        return None
-
-    # --------------------------------------------------------
-    # Receive packet
-    # --------------------------------------------------------
-
-    reception_start = (
-        time.perf_counter()
-    )
-
-    packet = recv_exact(
-        sock,
-        packet_length
-    )
-
-    reception_time = (
-        time.perf_counter()
-        - reception_start
-    )
-
-    if packet is None:
-
-        print(
-            "Incomplete packet received."
-        )
-
-        return None
-
-    print(
-        f"Packet received in "
-        f"{reception_time:.6f} sec"
-    )
-
-    return (
-        packet,
-        reception_time
-    )
-
-
-# ============================================================
-# PARSE SECURE PACKET
-# ============================================================
-
-def parse_secure_packet(
-    packet
-):
-
-    offset = 0
-
-    # --------------------------------------------------------
-    # ASCON key length
-    # --------------------------------------------------------
-
-    if len(packet) < 1:
-
-        raise ValueError(
-            "Invalid packet."
-        )
-
-    key_length = struct.unpack(
-        "!B",
-        packet[
-            offset:
-            offset + 1
-        ]
-    )[0]
-
-    offset += 1
-
-    # --------------------------------------------------------
-    # Validate ASCON key length
-    # --------------------------------------------------------
-
-    if key_length != 16:
-
-        raise ValueError(
-            "Invalid ASCON-128 key length."
-        )
-
-    # --------------------------------------------------------
-    # ASCON key
-    # --------------------------------------------------------
-
-    if (
-        offset + key_length
-        > len(packet)
-    ):
-
-        raise ValueError(
-            "Incomplete ASCON key."
-        )
-
-    ascon_key = packet[
-        offset:
-        offset + key_length
-    ]
-
-    offset += key_length
-
-    # --------------------------------------------------------
-    # Nonce
-    # --------------------------------------------------------
-
-    nonce_length = 16
-
-    if (
-        offset + nonce_length
-        > len(packet)
-    ):
-
-        raise ValueError(
-            "Incomplete nonce."
-        )
-
-    nonce = packet[
-        offset:
-        offset + nonce_length
-    ]
-
-    offset += nonce_length
-
-    # --------------------------------------------------------
-    # Ciphertext length
-    # --------------------------------------------------------
-
-    if (
-        offset + 4
-        > len(packet)
-    ):
-
-        raise ValueError(
-            "Missing ciphertext length."
-        )
-
-    ciphertext_length = struct.unpack(
-        "!I",
-        packet[
-            offset:
-            offset + 4
-        ]
-    )[0]
-
-    offset += 4
-
-    # --------------------------------------------------------
-    # Validate ciphertext length
-    # --------------------------------------------------------
-
-    if ciphertext_length <= 0:
-
-        raise ValueError(
-            "Invalid ciphertext length."
-        )
-
-    if (
-        offset + ciphertext_length
-        > len(packet)
-    ):
-
-        raise ValueError(
-            "Incomplete ciphertext."
-        )
-
-    # --------------------------------------------------------
-    # Ciphertext
-    # --------------------------------------------------------
-
-    ciphertext = packet[
-        offset:
-        offset + ciphertext_length
-    ]
-
-    return (
-        ascon_key,
-        nonce,
-        ciphertext
-    )
-
-
-# ============================================================
-# ASCON DECRYPTION
-# ============================================================
-
-def decrypt_image(
-    ascon_key,
-    nonce,
-    ciphertext
-):
-
-    start_time = (
-        time.perf_counter()
-    )
-
-    plaintext = decrypt(
-
-        ascon_key,
-
-        nonce,
-
-        AAD,
-
-        ciphertext
-    )
-
-    decryption_time = (
-        time.perf_counter()
-        - start_time
-    )
-
-    if plaintext is None:
-
-        raise ValueError(
-            "ASCON authentication failed."
-        )
-
-    return (
-        plaintext,
-        decryption_time
-    )
-
-
-# ============================================================
-# EXTRACT IMAGE PAYLOAD
-# ============================================================
-
-def extract_image_payload(
-    plaintext
-):
-
-    offset = 0
-
-    # --------------------------------------------------------
-    # Patient name length
-    # --------------------------------------------------------
-
-    if len(plaintext) < 2:
-
-        raise ValueError(
-            "Invalid plaintext."
-        )
-
-    patient_length = struct.unpack(
-        "!H",
-        plaintext[
-            offset:
-            offset + 2
-        ]
-    )[0]
-
-    offset += 2
-
-    # --------------------------------------------------------
-    # Patient name
-    # --------------------------------------------------------
-
-    if (
-        offset + patient_length
-        > len(plaintext)
-    ):
-
-        raise ValueError(
-            "Invalid patient name."
-        )
-
-    patient_name = plaintext[
-        offset:
-        offset + patient_length
-    ].decode(
-        "utf-8",
-        errors="replace"
-    )
-
-    offset += patient_length
-
-    # --------------------------------------------------------
-    # Filename length
-    # --------------------------------------------------------
-
-    if (
-        offset + 2
-        > len(plaintext)
-    ):
-
-        raise ValueError(
-            "Missing filename length."
-        )
-
-    filename_length = struct.unpack(
-        "!H",
-        plaintext[
-            offset:
-            offset + 2
-        ]
-    )[0]
-
-    offset += 2
-
-    # --------------------------------------------------------
-    # Filename
-    # --------------------------------------------------------
-
-    if (
-        offset + filename_length
-        > len(plaintext)
-    ):
-
-        raise ValueError(
-            "Invalid filename."
-        )
-
-    filename = plaintext[
-        offset:
-        offset + filename_length
-    ].decode(
-        "utf-8",
-        errors="replace"
-    )
-
-    offset += filename_length
-
-    # --------------------------------------------------------
-    # Image data
-    # --------------------------------------------------------
-
-    image_data = plaintext[
-        offset:
-    ]
-
-    if not image_data:
-
-        raise ValueError(
-            "Image data is empty."
-        )
-
-    return (
-        patient_name,
-        filename,
-        image_data
-    )
-
-
-# ============================================================
-# SANITIZE FOLDER / FILE NAME
-# ============================================================
-
-def sanitize_name(
-    name
-):
-
-    invalid_chars = (
-        '<>:"/\\|?*'
-    )
-
-    for char in invalid_chars:
-
-        name = name.replace(
-            char,
-            "_"
-        )
-
-    name = name.strip()
-
-    if not name:
-
-        name = "unknown"
-
-    return name
-
-
-# ============================================================
-# SAVE MEDICAL IMAGE
-# ============================================================
-
-def save_image(
-    patient_name,
-    filename,
-    image_data
-):
-
-    safe_patient = sanitize_name(
-        patient_name
-    )
-
-    safe_filename = sanitize_name(
-        Path(filename).name
-    )
-
-    patient_folder = (
-        RECEIVED_FOLDER
-        / safe_patient
-    )
-
-    patient_folder.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    output_path = (
-        patient_folder
-        / safe_filename
-    )
-
-    # --------------------------------------------------------
-    # Prevent accidental overwrite
-    # --------------------------------------------------------
-
-    if output_path.exists():
-
-        timestamp = int(
-            time.time()
-        )
-
-        output_path = (
-            patient_folder
-            / f"{output_path.stem}_"
-            f"{timestamp}"
-            f"{output_path.suffix}"
-        )
-
-    output_path.write_bytes(
-        image_data
-    )
-
-    return output_path
-
-
-# ============================================================
-# SAVE PERFORMANCE
-# ============================================================
-
-def save_performance(
-    receiver_id,
-    filename,
-    patient_name,
-    image_size_kb,
-    decryption_time,
-    reception_time
-):
-
-    overall_delay = (
-        decryption_time
-        + reception_time
-    )
-
-    throughput = (
-
-        image_size_kb
-        / reception_time
-
-        if reception_time > 0
-        else 0
-    )
-
-    initialize_csv()
-
-    with open(
-        CSV_FILE,
-        "a",
-        newline=""
-    ) as file:
-
-        writer = csv.DictWriter(
-            file,
-            fieldnames=CSV_FIELDS
-        )
-
-        writer.writerow({
-
-            "Receiver_ID":
-                receiver_id,
-
-            "Filename":
-                filename,
-
-            "Patient":
-                patient_name,
-
-            "ImageSizeKB":
-                f"{image_size_kb:.2f}",
-
-            "Decryption_Time":
-                f"{decryption_time:.6f}",
-
-            "Reception_Time":
-                f"{reception_time:.6f}",
-
-            "Overall_Delay":
-                f"{overall_delay:.6f}",
-
-            "Throughput_KBps":
-                f"{throughput:.2f}"
-        })
-
-    return (
-        overall_delay,
-        throughput
-    )
-
-
-# ============================================================
-# PROCESS ONE IMAGE
-# ============================================================
-
-def process_image(
-    packet,
-    reception_time
-):
-
-    # --------------------------------------------------------
-    # Parse packet
-    # --------------------------------------------------------
-
-    (
-        ascon_key,
-        nonce,
-        ciphertext
-    ) = parse_secure_packet(
-        packet
-    )
-
-    print(
-        "\n============================================"
-    )
-
-    print(
-        "ASCON DECRYPTION"
-    )
-
-    print(
-        "============================================"
-    )
-
-    # --------------------------------------------------------
-    # Decrypt
-    # --------------------------------------------------------
-
-    (
-        plaintext,
-        decryption_time
-    ) = decrypt_image(
-
-        ascon_key,
-
-        nonce,
-
-        ciphertext
-    )
-
-    print(
-        "ASCON authentication successful."
-    )
-
-    print(
-        f"Decryption time : "
-        f"{decryption_time:.6f} sec"
-    )
-
-    # --------------------------------------------------------
-    # Extract payload
-    # --------------------------------------------------------
-
-    (
-        patient_name,
-        filename,
-        image_data
-    ) = extract_image_payload(
-        plaintext
-    )
-
-    # --------------------------------------------------------
-    # Save image
-    # --------------------------------------------------------
-
-    output_path = save_image(
-
-        patient_name,
-
-        filename,
-
-        image_data
-    )
-
-    image_size_kb = (
-        len(image_data)
-        / 1024
-    )
-
-    # --------------------------------------------------------
-    # Performance
-    # --------------------------------------------------------
-
-    (
-        overall_delay,
-        throughput
-    ) = save_performance(
-
-        RECEIVER_ID,
-
-        filename,
-
-        patient_name,
-
-        image_size_kb,
-
-        decryption_time,
-
-        reception_time
-    )
-
-    # --------------------------------------------------------
-    # Display result
-    # --------------------------------------------------------
-
-    print(
-        "\n============================================"
-    )
-
-    print(
-        "MEDICAL IMAGE RECEIVED"
-    )
-
-    print(
-        "============================================"
-    )
-
-    print(
-        f"Receiver        : "
-        f"{RECEIVER_ID}"
-    )
-
-    print(
-        f"Patient         : "
-        f"{patient_name}"
-    )
-
-    print(
-        f"Filename        : "
-        f"{filename}"
-    )
-
-    print(
-        f"Image size      : "
-        f"{image_size_kb:.2f} KB"
-    )
-
-    print(
-        f"Decryption time : "
-        f"{decryption_time:.6f} sec"
-    )
-
-    print(
-        f"Reception time  : "
-        f"{reception_time:.6f} sec"
-    )
-
-    print(
-        f"Overall delay   : "
-        f"{overall_delay:.6f} sec"
-    )
-
-    print(
-        f"Throughput      : "
-        f"{throughput:.2f} KB/s"
-    )
-
-    print(
-        f"Saved to        : "
-        f"{output_path}"
-    )
-
-    print(
-        "============================================"
-    )
-
-
-# ============================================================
-# HANDLE CLIENT
-# ============================================================
-
-def handle_client(
-    client_socket,
-    client_address
-):
-
-    print(
-        "\n============================================"
-    )
-
-    print(
-        "NEW TCP CONNECTION"
-    )
-
-    print(
-        "============================================"
-    )
-
-    print(
-        f"Client : "
-        f"{client_address[0]}"
-    )
-
-    print(
-        f"Port   : "
-        f"{client_address[1]}"
-    )
-
-    try:
-
-        client_socket.settimeout(
-            SOCKET_TIMEOUT
-        )
-
-        # ----------------------------------------------------
-        # Authenticate sender
-        # ----------------------------------------------------
-
-        authenticated = (
-            authenticate_sender(
-                client_socket
-            )
-        )
-
-        if not authenticated:
-
-            print(
-                "\nSender authentication failed."
-            )
-
+        if image_path.suffix.lower() not in IMAGE_EXTENSIONS:
             return
 
-        # ----------------------------------------------------
-        # Receive image
-        # ----------------------------------------------------
-
-        result = (
-            receive_secure_packet(
-                client_socket
-            )
-        )
-
-        if result is None:
-
+        # Prevent duplicate processing
+        if image_path in self.processing:
             return
 
-        (
-            packet,
-            reception_time
-        ) = result
+        if not image_path.exists():
+            return
 
-        # ----------------------------------------------------
-        # Process image
-        # ----------------------------------------------------
+        self.processing.add(image_path)
 
-        process_image(
+        try:
+            print("\n============================================")
+            print("NEW MEDICAL IMAGE DETECTED")
+            print("============================================")
+            print(f"Image    : {image_path.name}")
+            print(f"Receiver : {self.receiver_id}")
+            print("============================================")
 
-            packet,
+            # Wait until file is completely copied
+            print("Waiting for file to become stable...")
+            ready = wait_for_file_ready(image_path)
 
-            reception_time
-        )
+            if not ready:
+                print("File disappeared.")
+                return
 
-    except socket.timeout:
+            print("File ready.")
 
-        print(
-            "\nConnection timed out."
-        )
+            # Send image
+            success = send_to_required_receiver(image_path, self.receiver_id)
 
-    except ConnectionResetError:
+            if success:
+                print("\nTransmission completed successfully.")
+            else:
+                print("\nTransmission failed.")
 
-        print(
-            "\nConnection reset by sender."
-        )
+        except Exception as e:
+            print(f"\nWatchdog processing error: {e}")
 
-    except ValueError as e:
+        finally:
+            self.processing.discard(image_path)
 
-        print(
-            f"\nPacket/decryption error: {e}"
-        )
+    # --------------------------------------------------------
+    # New file created
+    # --------------------------------------------------------
+    def on_created(self, event):
+        if event.is_directory:
+            return
+        image_path = Path(event.src_path)
+        self.process_image(image_path)
 
-    except Exception as e:
-
-        print(
-            f"\nReceiver error: {e}"
-        )
-
-    finally:
-
-        client_socket.close()
-
-        print(
-            "\nTCP connection closed."
-        )
+    # --------------------------------------------------------
+    # File moved into folder
+    # --------------------------------------------------------
+    def on_moved(self, event):
+        if event.is_directory:
+            return
+        image_path = Path(event.dest_path)
+        self.process_image(image_path)
 
 
 # ============================================================
-# START RECEIVER
+# SELECT RECEIVER
+# ============================================================
+
+def select_receiver():
+    receiver_list = list(RECEIVERS.keys())
+
+    print("\n============================================")
+    print("AVAILABLE RECEIVERS")
+    print("============================================")
+
+    for index, receiver_id in enumerate(receiver_list, start=1):
+        print(f"{index}. {receiver_id} ({RECEIVERS[receiver_id]['ip']})")
+
+    print("============================================")
+
+    while True:
+        try:
+            choice = int(input("Select required receiver: "))
+            if 1 <= choice <= len(receiver_list):
+                return receiver_list[choice - 1]
+            print("Invalid selection.")
+        except ValueError:
+            print("Enter a valid number.")
+
+
+# ============================================================
+# MAIN
 # ============================================================
 
 def main():
-
-    print(
-        "\n============================================"
-    )
-
-    print(
-        " SECURE MEDICAL IMAGE RECEIVER"
-    )
-
-    print(
-        "============================================"
-    )
-
-    print(
-        f"Receiver ID    : {RECEIVER_ID}"
-    )
-
-    print(
-        f"Listen address : {TCP_HOST}"
-    )
-
-    print(
-        f"TCP Port       : {TCP_PORT}"
-    )
-
-    print(
-        "Authentication : HMAC-SHA256"
-    )
-
-    print(
-        "Encryption     : ASCON-128"
-    )
-
-    print(
-        f"Output folder  : {RECEIVED_FOLDER}"
-    )
-
-    print(
-        "============================================"
-    )
-
-    # --------------------------------------------------------
-    # Validate
-    # --------------------------------------------------------
-
     validate_configuration()
-
-    initialize_directories()
-
     initialize_csv()
 
-    # --------------------------------------------------------
-    # Create TCP server
-    # --------------------------------------------------------
+    print("\n============================================")
+    print(" SECURE MEDICAL IMAGE WATCHDOG SENDER")
+    print("============================================")
+    print("Protocol       : TCP")
+    print("Authentication : HMAC-SHA256")
+    print("Encryption     : ASCON-128")
+    print(f"TCP Port       : {TCP_PORT}")
+    print(f"Watch Folder   : {IMAGE_FOLDER}")
+    print("============================================")
 
-    server_socket = socket.socket(
-        socket.AF_INET,
-        socket.SOCK_STREAM
-    )
+    if not IMAGE_FOLDER.exists():
+        print("\nERROR: Image folder does not exist.")
+        print(IMAGE_FOLDER)
+        return
 
-    # --------------------------------------------------------
-    # Allow quick restart
-    # --------------------------------------------------------
+    # Select receiver once
+    receiver_id = select_receiver()
 
-    server_socket.setsockopt(
-        socket.SOL_SOCKET,
-        socket.SO_REUSEADDR,
-        1
-    )
+    print("\n============================================")
+    print("WATCHDOG STARTED")
+    print("============================================")
+    print(f"Receiver : {receiver_id}")
+    print(f"Folder   : {IMAGE_FOLDER}")
+    print("\nWaiting for new medical images...")
+    print("Press Ctrl+C to stop.")
+    print("============================================")
 
-    # --------------------------------------------------------
-    # Bind
-    # --------------------------------------------------------
+    event_handler = MedicalImageHandler(receiver_id)
 
-    server_socket.bind(
-        (
-            TCP_HOST,
-            TCP_PORT
-        )
-    )
-
-    # --------------------------------------------------------
-    # Listen
-    # --------------------------------------------------------
-
-    server_socket.listen(
-        5
-    )
-
-    print(
-        "\n============================================"
-    )
-
-    print(
-        "RECEIVER STARTED"
-    )
-
-    print(
-        "============================================"
-    )
-
-    print(
-        f"Listening on "
-        f"{TCP_HOST}:{TCP_PORT}"
-    )
-
-    print(
-        "Waiting for medical image..."
-    )
-
-    print(
-        "Press Ctrl+C to stop."
-    )
-
-    print(
-        "============================================"
-    )
+    observer = Observer()
+    observer.schedule(event_handler, str(IMAGE_FOLDER), recursive=False)
+    observer.start()
 
     try:
-
         while True:
-
-            client_socket, client_address = (
-                server_socket.accept()
-            )
-
-            handle_client(
-
-                client_socket,
-
-                client_address
-            )
-
-            print(
-                "\nWaiting for next image..."
-            )
-
+            time.sleep(1)
     except KeyboardInterrupt:
+        print("\n\nStopping watchdog...")
+        observer.stop()
 
-        print(
-            "\n\nStopping receiver..."
-        )
-
-    finally:
-
-        server_socket.close()
-
-        print(
-            "Receiver stopped."
-        )
+    observer.join()
+    print("\nSender stopped.")
 
 
 # ============================================================
-# START
+# START PROGRAM
 # ============================================================
 
 if __name__ == "__main__":
-
     main()
