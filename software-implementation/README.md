@@ -522,48 +522,59 @@ The reconstructed medical image is stored in:
 
 ---
 
-# Complete Protocol Flow
+# ##  Communication Protocol Sequence
 
-    SENDER                                      RECEIVER
-      │                                             │
-      │────── TCP Connection ─────────────────────►│
-      │                                             │
-      │────── Receiver ID ────────────────────────►│
-      │                                             │
-      │────── Fresh Challenge ────────────────────►│
-      │                                             │
-      │◄──── HMAC Challenge Response ─────────────│
-      │                                             │
-      │        Verify Receiver Authentication       │
-      │                                             │
-      │◄──── HQC Public Key ──────────────────────│
-      │                                             │
-      │────── HQC Ciphertext ─────────────────────►│
-      │                                             │
-      │        Shared Session Key Established       │
-      │                                             │
-      │        A = Challenge || Receiver_ID        │
-      │                                             │
-      │        ASCON-128 Encryption                 │
-      │        C + T                                │
-      │                                             │
-      │        B = HMAC(K_identity, A || T)        │
-      │                                             │
-      │────── {C,T,B,Receiver_ID,N_A} ────────────►│
-      │                                             │
-      │                                   Verify HMAC
-      │                                             │
-      │                                   HMAC Valid?
-      │                                             │
-      │                                   ASCON Decrypt
-      │                                             │
-      │                                   Verify Tag
-      │                                             │
-      │◄──────────────── ACK ──────────────────────│
-      │                                             │
+```mermaid
+sequenceDiagram
+    autonumber
 
----
+    participant S as Sender
+    participant R as Authorized Receiver
 
+    S->>R: TCP Connection
+    S->>R: Receiver ID
+    S->>R: Fresh Random Challenge
+
+    R->>S: HMAC-SHA256 Challenge Response
+
+    S->>S: Verify Receiver Authentication
+
+    alt Authentication Failed
+        S-->>R: Abort Communication
+    else Authentication Successful
+        R->>S: HQC Public Key
+        S->>S: HQC Encapsulation
+        S->>R: HQC Ciphertext
+        R->>R: HQC Decapsulation
+        Note over S,R: Shared Session Key K Established
+
+        S->>S: A = Challenge || Receiver_ID
+        S->>S: ASCON-128 Encryption
+        Note over S: C = Ciphertext<br/>T = ASCON Authentication Tag
+
+        S->>S: B = HMAC-SHA256(K_identity, A || T)
+
+        S->>R: {C, T, B, Receiver_ID, N_A}
+
+        R->>R: Reconstruct A
+        R->>R: Verify HMAC
+
+        alt HMAC Invalid
+            R-->>S: Authentication Failed
+            R->>R: Discard Packet
+        else HMAC Valid
+            R->>R: ASCON-128 Decrypt + Verify Tag
+
+            alt ASCON Tag Invalid
+                R-->>S: Integrity Verification Failed
+                R->>R: Discard Image
+            else ASCON Tag Valid
+                R->>R: Reconstruct Medical Image
+                R->>R: Display / Save Image
+                R-->>S: ACK
+            end
+        end
+    end
 # Multiple Receiver Support
 
 The sender can communicate with multiple authorized receivers.
