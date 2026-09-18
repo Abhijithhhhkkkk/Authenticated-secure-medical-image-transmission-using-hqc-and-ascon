@@ -844,4 +844,259 @@ The implementation can be tested using different security scenarios.
           ▼
     Packet Discarded
 
-## Modi
+## Modified ASCON Tag
+
+    Packet Received
+          │
+          ▼
+    HMAC Verification
+          │
+          ▼
+       Valid
+          │
+          ▼
+    ASCON Tag Verification
+          │
+          ▼
+       Invalid Tag
+          │
+          ▼
+    Image Not Released
+
+## Replay Attempt
+
+    Previously Used Authentication Data
+                  │
+                  ▼
+          Fresh Challenge Required
+                  │
+                  ▼
+           Authentication Check
+                  │
+                  ▼
+              Rejected
+
+---
+
+# Important Security Notes
+
+- Never hard-code authentication secrets in source code.
+- Store sensitive configuration values in environment variables.
+- Add `.env` to `.gitignore`.
+- Never commit `.env` files containing real credentials.
+- Protect `.env` files with appropriate file permissions.
+- Use strong random challenges for authentication.
+- Use sufficiently strong authentication secrets.
+- Do not transmit session keys directly through the network.
+- Use constant-time comparison for HMAC verification.
+- Perform authentication before medical-image transfer.
+- Do not decrypt the image when HMAC verification fails.
+- Do not release plaintext when the ASCON authentication tag is invalid.
+- Do not disable authentication checks for performance testing.
+
+---
+
+# Software Requirements
+
+The implementation requires a Python environment and the cryptographic/networking dependencies specified by the project.
+
+Install the Python dependencies using:
+
+    pip install -r requirements.txt
+
+The project may require Open Quantum Safe libraries for HQC support.
+
+The software environment can be configured on a Linux system such as Fedora or another compatible Linux distribution.
+
+---
+
+# Technologies Used
+
+## Programming
+
+- Python
+
+## Cryptography
+
+- HQC KEM
+- ASCON-128 AEAD
+- HMAC-SHA256
+
+## Networking
+
+- TCP/IP
+- Python socket programming
+
+## Post-Quantum Cryptography
+
+- Open Quantum Safe (liboqs)
+- liboqs-python
+
+## Data
+
+- JPEG
+- PNG
+- Medical image files
+
+## Performance Analysis
+
+- Python timing functions
+- CSV logging
+- Cryptographic execution-time measurement
+- Network latency measurement
+- Throughput measurement
+
+---
+
+# Limitations
+
+This directory focuses on the software implementation of the proposed secure medical-image transmission framework.
+
+The following hardware-specific analysis is outside the scope of this software implementation:
+
+- FPGA resource utilization
+- FPGA power consumption
+- FPGA maximum operating frequency
+- Hardware timing analysis
+- FPGA throughput optimization
+- Hardware implementation efficiency
+
+These parameters are evaluated separately during the FPGA implementation phase.
+
+The current software implementation is a research prototype and does not represent a complete production medical-data security system.
+
+---
+
+# Future Enhancements
+
+Future development may include:
+
+- FPGA acceleration of HQC
+- FPGA acceleration of ASCON-128
+- FPGA implementation of HMAC-SHA256
+- FPGA resource utilization analysis
+- FPGA power-consumption analysis
+- Maximum operating-frequency analysis
+- Hardware/software performance comparison
+- Additional medical-image formats
+- Multi-image transmission within a single session
+- Improved key-management infrastructure
+- Secure audit logging
+- DICOM medical-image integration
+- Network optimization
+- Image compression
+- Comparison with classical key-establishment approaches such as RSA and ECDH
+
+---
+
+# Project Development Approach
+
+The project follows a software-to-hardware development workflow:
+
+    Protocol Design
+          │
+          ▼
+    Software Implementation
+          │
+          ▼
+    Functional Testing
+          │
+          ▼
+    Security Testing
+          │
+          ▼
+    Performance Evaluation
+          │
+          ▼
+    FPGA Cryptographic Implementation
+          │
+          ▼
+    Hardware Acceleration
+          │
+          ▼
+    Software vs Hardware Comparison
+
+The software implementation provides the functional reference for the subsequent FPGA implementation.
+
+---
+
+# License
+
+This project is licensed under the MIT License.
+
+You are free to use, modify, and distribute the software in accordance with the terms of the license.
+
+---
+
+# References
+
+## HQC
+
+Hamming Quasi-Cyclic (HQC) Key Encapsulation Mechanism:
+
+https://www.pqc-hqc.org/doc/hqc-specification_2020-05-29.pdf
+
+## NIST Post-Quantum Cryptography
+
+NIST Post-Quantum Cryptography Project:
+
+https://csrc.nist.gov/projects/post-quantum-cryptography
+
+## ASCON
+
+Ascon Authenticated Encryption:
+
+https://ascon.iaik.tugraz.at/
+
+## Open Quantum Safe
+
+Open Quantum Safe (liboqs):
+
+https://github.com/open-quantum-safe/liboqs
+
+## liboqs-python
+
+Python bindings for Open Quantum Safe:
+
+https://github.com/open-quantum-safe/liboqs-python
+
+## HMAC-SHA256
+
+RFC 2104 — HMAC: Keyed-Hashing for Message Authentication:
+
+https://www.rfc-editor.org/rfc/rfc2104.html
+
+---
+
+# Disclaimer
+
+This implementation is intended for academic and research purposes.
+
+It demonstrates a prototype architecture for secure medical-image transmission and should not be deployed as a production medical-data security system without appropriate security evaluation, regulatory compliance, key-management infrastructure, and testing in the target environment.
+
+---
+
+# Author & Attribution
+
+**Project:** Authenticated Secure Medical Image Transmission Using HQC and Ascon
+
+**Component:** Software Implementation
+
+**Course:** Final Year Electronics and Communication Engineering Project
+
+**Institution:** Government College of Engineering Kannur (GCE Kannur)
+
+**Academic Year:** 2023–2027
+
+## Project Team
+
+- Abhijith K
+- Arya
+- Jithin
+- Gokul
+
+## Maintainer
+
+**Abhijith K**
+
+**Email:** abhijithk20052@gmail.com
