@@ -1,538 +1,847 @@
 # Authenticated Secure Medical Image Transmission Using HQC and Ascon
 
+**Software Implementation | HQC KEM | ASCON-128 | HMAC-SHA256 | TCP/IP | Secure Medical Imaging**
+
 ## Overview
 
-This software implementation demonstrates a **post-quantum secure medical image transmission system** that combines:
-- **HQC (Hamming Quasi-Cyclic)** post-quantum key encapsulation mechanism (KEM)
-- **Ascon-128** authenticated encryption with associated data (AEAD)
-- **HMAC-SHA256** challenge-response authentication
+This software implementation demonstrates a post-quantum secure medical image transmission system that combines:
 
-The system securely transmits medical images between a sender and multiple authorized receivers over TCP/IP networks with protection against both classical and quantum-level cryptographic attacks.
+- HQC (Hamming Quasi-Cyclic) post-quantum Key Encapsulation Mechanism (KEM)
+- ASCON-128 authenticated encryption with associated data (AEAD)
+- HMAC-SHA256 challenge-response authentication
+- Receiver identity binding
+- TCP/IP communication
+- Multiple authorized receivers
+- Cryptographic and communication performance measurement
 
-## System Flow
+The system securely transmits medical images between a sender and multiple authorized receivers while providing confidentiality, integrity, receiver authentication, secure session-key establishment, and replay resistance.
 
-```
-Sender → Select Image → Select Receiver → Authentication Challenge
-           ↓
-       Authentication Success?
-           ├─ NO → Stop
-           └─ YES ↓
-       HQC Key Exchange → Establish Shared Secret
-           ↓
-       Derive ASCON Session Key
-           ↓
-       Encrypt Image with ASCON-128
-           ↓
-       TCP Transmission
-           ↓
-       Receiver: Authenticate & Decrypt
-           ↓
-       Medical Image Reconstructed
-```
+The software implementation serves as the first stage of the project before migration of selected cryptographic components to FPGA hardware for acceleration.
+
+---
+
+## Key Features
+
+- Post-quantum key establishment using HQC KEM
+- ASCON-128 authenticated encryption
+- HMAC-SHA256 receiver authentication
+- Fresh random challenge for each authentication session
+- Receiver identity binding
+- Secure TCP/IP image transmission
+- Support for multiple receivers
+- No direct transmission of session keys
+- Authentication before medical-image transfer
+- HMAC verification before decryption
+- ASCON authentication-tag verification
+- Automatic performance logging
+- Software performance evaluation
+
+---
 
 ## Key Objectives
 
 - Secure medical image transmission over TCP/IP
-- Receiver authentication before key exchange
-- Protection against unauthorized access
-- Post-quantum secure key establishment using HQC
-- Confidentiality and integrity using Ascon-128 AEAD
-- Challenge-response authentication with replay resistance
-- Performance measurement of cryptographic operations
-- Support for multiple receivers
-- Session key derivation without direct transmission
+- Authenticate authorized receivers before image transmission
+- Prevent unauthorized access to medical images
+- Establish session keys using HQC KEM
+- Provide confidentiality using ASCON-128
+- Provide integrity using ASCON authentication tags
+- Provide receiver authentication using HMAC-SHA256
+- Provide replay resistance using fresh random challenges
+- Support communication with multiple authorized receivers
+- Measure cryptographic execution time and network performance
+- Prepare the cryptographic modules for future FPGA acceleration
+
 ---
 
 ## System Architecture
 
-### Sender (TCP Client)
+The software system consists of two primary components:
 
-**Responsibilities:**
-1. Load receiver information from `.env` file
-2. Connect to selected receiver via TCP
-3. Perform HMAC challenge-response authentication
-4. Receive receiver's HQC public key
-5. Perform HQC key encapsulation
-6. Derive ASCON session key from shared secret
-7. Encrypt medical image using Ascon-128 AEAD
-8. Transmit encrypted image over TCP
-9. Log performance metrics
+### Sender
 
-### Receiver (TCP Server)
+The sender operates as a TCP client and is responsible for:
 
-**Responsibilities:**
-1. Listen for incoming TCP connections
-2. Identify itself via receiver ID
-3. Respond to authentication challenge
-4. Generate HQC key pair upon successful authentication
-5. Send HQC public key to sender
-6. Perform HQC key decapsulation
-7. Derive same ASCON session key
-8. Receive and verify encrypted image
-9. Decrypt and save medical image
-10. Log performance metrics
+1. Loading receiver configuration from the `.env` file
+2. Selecting the medical image
+3. Connecting to the selected receiver
+4. Performing receiver authentication
+5. Receiving the receiver's HQC public key
+6. Performing HQC encapsulation
+7. Establishing the shared session key
+8. Generating a fresh authentication challenge
+9. Binding the challenge to the receiver identity
+10. Encrypting the medical image using ASCON-128 AEAD
+11. Generating the identity-binding HMAC
+12. Constructing the secure packet
+13. Transmitting the encrypted image over TCP
+14. Recording performance measurements
 
----
+### Receiver
 
-## Security Protocol
+The receiver operates as a TCP server and is responsible for:
 
-### 1. Receiver Authentication (HMAC-SHA256)
-
-The sender initiates authentication with a fresh random challenge:
-
-```python
-challenge = secrets.token_bytes(32)
-```
-
-The receiver calculates:
-```
-HMAC-SHA256(Kidentity, Challenge || Receiver_ID)
-```
-
-The sender verifies using constant-time comparison:
-```python
-hmac.compare_digest(received_hmac, expected_hmac)
-```
-
-**Authentication Result:**
--  **Match** → Proceed to HQC key exchange
-- **Mismatch** → Abort; do not send medical image
-
-**Security Features:**
-- Fresh random challenge for every session (prevents replay attacks)
-- Pre-shared identity key between sender and receiver
-- Constant-time comparison (prevents timing attacks)
-
-### 2. HQC Key Encapsulation
-
-After authentication succeeds:
-
-1. **Receiver generates HQC key pair:**
-   - Public key (sent to sender)
-   - Private key (kept secret)
-
-2. **Sender performs encapsulation:**
-   ```
-   Receiver's Public Key → HQC Encapsulation → {Ciphertext, Shared Secret}
-   ```
-
-3. **Receiver performs decapsulation:**
-   ```
-   HQC Ciphertext + Private Key → HQC Decapsulation → Shared Secret
-   ```
-
-Both parties obtain the same **shared secret** without transmitting it.
-
-### 3. ASCON-128 Session Key Derivation
-
-```
-HQC Shared Secret → Key Derivation Function → ASCON-128 Session Key
-```
-
-- Session key is **never transmitted** over the network
-- Derived independently by sender and receiver
-
-### 4. Medical Image Encryption (Ascon-128 AEAD)
-
-**Encryption inputs:**
-```
-Medical Image + ASCON Session Key + Nonce + AAD("medical-image")
-    ↓
-ASCON-128 AEAD Encryption
-    ↓
-Ciphertext + Authentication Tag
-```
-
-**Decryption verification:**
-- Authentication tag allows receiver to detect tampering/corruption
-- Ensures **confidentiality** and **integrity**
-
-### 5. Secure Transmission Over TCP
-
-**Transmitted packet structure:**
-```
-┌─────────────────────────────────────┐
-│ Receiver ID                         │
-│ Patient Information                 │
-│ Image Filename                      │
-│ Nonce (for Ascon-128)              │
-│ Encrypted Image (Ciphertext)        │
-│ Authentication Tag                  │
-└─────────────────────────────────────┘
-
-  ASCON Session Key is NOT included
-```
+1. Listening for incoming TCP connections
+2. Identifying itself using the receiver ID
+3. Responding to the authentication challenge
+4. Generating an HQC key pair after successful authentication
+5. Sending the HQC public key to the sender
+6. Performing HQC decapsulation
+7. Recovering the shared session key
+8. Receiving the encrypted image packet
+9. Verifying the HMAC
+10. Performing ASCON-128 authenticated decryption
+11. Verifying the ASCON authentication tag
+12. Reconstructing and saving the medical image
+13. Recording performance measurements
 
 ---
 
 ## Project Structure
 
-```
-software-implementation/
-├── sender/
-│   ├── sender.py                 # Sender implementation
-│   ├── .env                      # Configuration (DO NOT commit)
-│   ├── img/                      # Medical images to transmit
-│   │   ├── image1.jpg
-│   │   ├── image2.png
-│   │   └── ...
-│   └── performance_log.csv       # Metrics (generated at runtime)
-│
-├── receiver/
-│   ├── receiver.py               # Receiver implementation
-│   ├── .env                      # Configuration (DO NOT commit)
-│   ├── img/                      # Received/reconstructed images
-│   │   ├── received_image1.jpg
-│   │   └── ...
-│   └── performance_log_receiver.csv  # Metrics (generated at runtime)
-│
-└── README.md                     # This file
-```
+    software-implementation/
+    │
+    ├── sender/
+    │   ├── sender.py
+    │   ├── img/
+    │   │   ├── image1.jpg
+    │   │   ├── image2.png
+    │   │   └── ...
+    │   └── performance_log.csv
+    │
+    ├── receiver/
+    │   ├── receiver.py
+    │   ├── img/
+    │   │   ├── received_image1.jpg
+    │   │   ├── received_image2.png
+    │   │   └── ...
+    │   └── performance_log_receiver.csv
+    │
+    └── README.md
 
 ---
 
-## Requirements
+## System Flow
 
-### Software Requirements
-- **Python 3.8+**
-- **Linux/Ubuntu recommended** (or WSL on Windows)
-- **TCP/IP network connectivity**
-- Python virtual environment (recommended)
-
-### Python Dependencies
-
-```bash
-pip install python-dotenv
-```
-
-**Cryptographic Libraries:**
-- **Ascon-128** implementation (specify package)
-- **liboqs-python** for HQC (Open Quantum Safe bindings)
-
-Install all dependencies:
-```bash
-pip install -r requirements.txt
-```
-
----
-
-## Configuration
-
-### Sender `.env` File
-
-Store IP addresses and authentication secrets for authorized receivers:
-
-```env
-TCP_PORT=5000
-
-RECEIVER1_IP=192.168.1.101
-RECEIVER1_ID=receiver1
-RECEIVER1_KEY=receiver1-secret-key-123456
-
-RECEIVER2_IP=192.168.1.102
-RECEIVER2_ID=receiver2
-RECEIVER2_KEY=receiver2-secret-key-654321
-
-RECEIVER3_IP=192.168.1.103
-RECEIVER3_ID=receiver3
-RECEIVER3_KEY=receiver3-secret-key-abcdef
-```
-
-### Receiver `.env` File
-
-Each receiver stores its identity and shared authentication secret:
-
-```env
-RECEIVER_ID=receiver1
-RECEIVER_SECRET=receiver1-secret-key-123456
-TCP_PORT=5000
-```
-
-**Important:** The receiver secret **must match exactly** with the sender's corresponding key:
-```
-Sender:    RECEIVER1_KEY=receiver1-secret-key-123456
-Receiver 1: RECEIVER_SECRET=receiver1-secret-key-123456
-```
-
- **Security Note:** Never commit `.env` files to version control. Add to `.gitignore`:
-```
-.env
-*.env
-```
-
----
-
-## Running the System
-
-### Step 1: Start Receiver
-
-On the receiver machine:
-
-```bash
-python3 receiver.py
-```
-
-Expected output:
-```
-Receiver ID: receiver1
-TCP server listening on port 5000...
-Waiting for sender connection...
-```
-
-### Step 2: Start Sender
-
-On the sender machine:
-
-```bash
-python3 sender.py
-```
-
-**Select receiver:**
-```
-Available Receivers:
-1. receiver1
-2. receiver2
-3. receiver3
-
-Select receiver [1-3]: 1
-```
-
-**Select medical image:**
-```
-Available Medical Images:
-1. patient1.jpg
-2. patient2.png
-3. patient3.jpg
-
-Select image [1-3]: 1
-```
+    Sender
+       │
+       ▼
+    Select Medical Image
+       │
+       ▼
+    Select Authorized Receiver
+       │
+       ▼
+    Establish TCP Connection
+       │
+       ▼
+    Generate Authentication Challenge
+       │
+       ▼
+    Receiver Authentication
+       │
+       ├── Authentication Failed ──► Abort
+       │
+       ▼
+    HQC Key Establishment
+       │
+       ▼
+    Shared Session Key Established
+       │
+       ▼
+    Construct Associated Data
+       │
+       ▼
+    ASCON-128 Encryption
+       │
+       ├── Encrypted Image C
+       └── Authentication Tag T
+       │
+       ▼
+    HMAC-SHA256 Generation
+       │
+       ▼
+    Construct Secure Packet
+       │
+       ▼
+    TCP Transmission
+       │
+       ▼
+    Receiver
+       │
+       ▼
+    Receive Complete Packet
+       │
+       ▼
+    HMAC Verification
+       │
+       ├── Invalid ──► Discard Packet
+       │
+       ▼
+    ASCON-128 Decryption
+       │
+       ▼
+    ASCON Tag Verification
+       │
+       ├── Invalid ──► Discard Packet
+       │
+       ▼
+    Medical Image Reconstructed
+       │
+       ▼
+    Save Image
 
 ---
 
-## Execution Flow Logs
+# Security Protocol
 
-### Authentication Phase
+## 1. TCP Connection
 
-```
-Connecting to receiver1 at 192.168.1.101:5000...
-✓ TCP connection established
+The sender establishes a TCP connection with the selected authorized receiver.
 
-Starting receiver authentication...
-✓ Challenge generated (32 bytes)
-✓ Waiting for HMAC response...
-✓ Authentication successful
-```
+    Sender ───────────── TCP Connection ─────────────► Receiver
 
-**If authentication fails:**
-```
-✗ Authentication failed
-✗ HQC key exchange will NOT proceed
-✗ Medical image will NOT be sent
-```
-
-### HQC Key Exchange
-
-```
-Receiver: Generating HQC key pair...
-✓ HQC key pair generated
-✓ Sending public key to sender...
-
-Sender: Receiving HQC public key...
-✓ Performing HQC encapsulation...
-✓ HQC ciphertext generated
-✓ Sending HQC ciphertext to receiver...
-
-Receiver: Performing HQC decapsulation...
-✓ Shared secret established
-```
-
-### Image Transmission
-
-```
-Encrypting medical image with Ascon-128...
-✓ Encryption completed
-✓ Sending encrypted image...
-✓ Transmission completed (2.5 MB)
-
-Receiver: Receiving encrypted image...
-✓ Verifying Ascon authentication tag...
-✓ Authentication tag valid
-✓ Decrypting medical image...
-✓ Medical image successfully reconstructed
-✓ Saved to: receiver/img/received_patient1.jpg
-```
+TCP is used as the transport protocol because it provides reliable and ordered delivery of the encrypted image data.
 
 ---
 
-## Performance Measurement
+## 2. Receiver Authentication
 
-### Measured Parameters
+Before HQC key establishment and medical-image transmission, the receiver is authenticated.
 
-| Parameter | Description | Unit |
-|-----------|-------------|------|
-| **HQC Key Generation Time** | Time to generate HQC key pair | ms |
-| **HQC Encapsulation Time** | Sender-side HQC encapsulation | ms |
-| **HQC Decapsulation Time** | Receiver-side HQC decapsulation | ms |
-| **HMAC Authentication Time** | Receiver authentication duration | ms |
-| **ASCON Encryption Time** | Image encryption time | ms |
-| **ASCON Decryption Time** | Image decryption time | ms |
-| **Transmission Time** | TCP transfer duration | ms |
-| **Overall Delay** | Total end-to-end latency | ms |
-| **Throughput** | Data transfer rate | MB/s |
-| **Image Size** | Medical image file size | MB |
+The sender generates a fresh random challenge:
 
-### Output Files
+    Challenge = secrets.token_bytes(32)
 
-Performance metrics are automatically logged to CSV files:
+The challenge is associated with the receiver identity.
 
-**Sender:**
-```
-sender/performance_log.csv
-```
+The receiver computes an authentication response using its identity secret:
 
-**Receiver:**
-```
-receiver/performance_log_receiver.csv
-```
+    HMAC-SHA256(K_identity, Challenge || Receiver_ID)
+
+where:
+
+- `K_identity` is the shared receiver authentication secret
+- `Challenge` is the fresh random challenge
+- `Receiver_ID` is the identity of the receiver
+- `||` represents concatenation
+
+The sender verifies the received authentication value using a constant-time comparison.
+
+    hmac.compare_digest(received_hmac, expected_hmac)
+
+If authentication succeeds:
+
+    Authentication Successful
+             │
+             ▼
+    Proceed to HQC Key Establishment
+
+If authentication fails:
+
+    Authentication Failed
+             │
+             ▼
+    Abort Communication
+             │
+             ▼
+    Do Not Transmit Medical Image
+
+---
+
+## 3. HQC Key Establishment
+
+After successful receiver authentication, the receiver generates or provides its HQC public key.
+
+The sender performs HQC encapsulation using the receiver's public key.
+
+    Receiver HQC Public Key
+             │
+             ▼
+      HQC Encapsulation
+             │
+          ┌──┴──┐
+          ▼     ▼
+       Key K  Ciphertext
+                │
+                ▼
+        Send HQC Ciphertext
+                │
+                ▼
+             Receiver
+                │
+                ▼
+       HQC Decapsulation
+                │
+                ▼
+          Shared Key K
+
+Both sender and receiver obtain the same shared secret.
+
+The session key is not transmitted directly over the network.
+
+---
+
+## 4. Challenge and Receiver Identity Binding
+
+A fresh challenge is generated for the current authentication session.
+
+The challenge is combined with the receiver identity:
+
+    A = Challenge || Receiver_ID
+
+The value `A` binds the authentication operation to:
+
+- The current session challenge
+- The intended receiver
+
+This value is used as associated data during the authenticated encryption process and as part of the HMAC calculation.
+
+---
+
+## 5. ASCON-128 Authenticated Encryption
+
+The selected medical image is loaded from:
+
+    sender/img/
+
+Supported image formats include:
+
+- `.jpg`
+- `.jpeg`
+- `.png`
+
+The image is encrypted using ASCON-128 AEAD.
+
+Conceptually:
+
+    (C, T) = ASCON_Encrypt(K, N_A, A, P)
+
+where:
+
+- `K` = shared ASCON session key
+- `N_A` = ASCON nonce
+- `A` = associated authenticated data
+- `P` = original medical image
+- `C` = encrypted medical image
+- `T` = ASCON authentication tag
+
+ASCON provides confidentiality and authenticated integrity protection for the medical image.
+
+---
+
+## 6. Identity-Binding HMAC
+
+After ASCON encryption, the sender computes an HMAC using the receiver's identity secret.
+
+    B = HMAC-SHA256(K_identity, A || T)
+
+where:
+
+- `K_identity` = receiver authentication secret
+- `A` = `Challenge || Receiver_ID`
+- `T` = ASCON authentication tag
+- `B` = HMAC authentication value
+
+The ASCON authentication tag is included in the HMAC input so that the authentication value is bound to the protected image data.
+
+---
+
+## 7. Secure Packet Construction
+
+The sender constructs a packet containing the information required by the receiver.
+
+    {
+        C,
+        T,
+        B,
+        Receiver_ID,
+        N_A
+    }
+
+where:
+
+- `C` = encrypted medical image
+- `T` = ASCON authentication tag
+- `B` = HMAC-SHA256 authentication value
+- `Receiver_ID` = intended receiver identity
+- `N_A` = ASCON nonce
+
+The authentication challenge was already exchanged during the authentication stage.
+
+---
+
+## 8. Secure Transmission
+
+The complete encrypted packet is transmitted over TCP/IP.
+
+    Sender
+       │
+       │ {C, T, B, Receiver_ID, N_A}
+       │
+       ▼
+    TCP/IP
+       │
+       ▼
+    Receiver
+
+The medical image is never transmitted as plaintext.
+
+---
+
+# Receiver Verification
+
+The receiver performs verification before releasing the medical image.
+
+## Step 1: Receive Complete Packet
+
+The receiver obtains:
+
+    {C, T, B, Receiver_ID, N_A}
+
+---
+
+## Step 2: Reconstruct Authentication Data
+
+The receiver reconstructs:
+
+    A = Challenge || Receiver_ID
+
+---
+
+## Step 3: Recompute HMAC
+
+The receiver calculates:
+
+    B' = HMAC-SHA256(K_identity, A || T)
+
+The calculated HMAC `B'` is compared with the received HMAC `B`.
+
+    B' == B
+
+The comparison should be performed using a constant-time comparison.
+
+    hmac.compare_digest(received_hmac, calculated_hmac)
+
+---
+
+## HMAC Verification Failure
+
+If the HMAC verification fails:
+
+    Received Packet
+          │
+          ▼
+    HMAC Verification
+          │
+          ▼
+       Invalid
+          │
+          ▼
+    Discard Packet
+          │
+          ▼
+    Do Not Decrypt Image
+
+The receiver must not decrypt or release the medical image when authentication fails.
+
+---
+
+## HMAC Verification Success
+
+If the HMAC is valid:
+
+    Received Packet
+          │
+          ▼
+    HMAC Verification
+          │
+          ▼
+        Valid
+          │
+          ▼
+    Proceed to ASCON Decryption
+
+---
+
+# ASCON Decryption and Verification
+
+After successful HMAC verification, the receiver performs ASCON-128 authenticated decryption.
+
+Conceptually:
+
+    P = ASCON_Decrypt(K, N_A, A, C, T)
+
+ASCON verifies the authentication tag during the decryption process.
+
+---
+
+## Invalid ASCON Authentication Tag
+
+If the ASCON authentication tag is invalid:
+
+    HMAC Valid
+        │
+        ▼
+    ASCON Decryption
+        │
+        ▼
+    Tag Invalid
+        │
+        ▼
+    Discard Result
+        │
+        ▼
+    Do Not Release Image
+
+This protects against modified or corrupted encrypted image data.
+
+---
+
+## Valid ASCON Authentication Tag
+
+If the ASCON authentication tag is valid:
+
+    HMAC Valid
+        │
+        ▼
+    ASCON Decryption
+        │
+        ▼
+    Tag Valid
+        │
+        ▼
+    Medical Image Reconstructed
+        │
+        ▼
+    Save Image
+
+The reconstructed medical image is stored in:
+
+    receiver/img/
+
+---
+
+# Complete Protocol Flow
+
+    SENDER                                      RECEIVER
+      │                                             │
+      │────── TCP Connection ─────────────────────►│
+      │                                             │
+      │────── Receiver ID ────────────────────────►│
+      │                                             │
+      │────── Fresh Challenge ────────────────────►│
+      │                                             │
+      │◄──── HMAC Challenge Response ─────────────│
+      │                                             │
+      │        Verify Receiver Authentication       │
+      │                                             │
+      │◄──── HQC Public Key ──────────────────────│
+      │                                             │
+      │────── HQC Ciphertext ─────────────────────►│
+      │                                             │
+      │        Shared Session Key Established       │
+      │                                             │
+      │        A = Challenge || Receiver_ID        │
+      │                                             │
+      │        ASCON-128 Encryption                 │
+      │        C + T                                │
+      │                                             │
+      │        B = HMAC(K_identity, A || T)        │
+      │                                             │
+      │────── {C,T,B,Receiver_ID,N_A} ────────────►│
+      │                                             │
+      │                                   Verify HMAC
+      │                                             │
+      │                                   HMAC Valid?
+      │                                             │
+      │                                   ASCON Decrypt
+      │                                             │
+      │                                   Verify Tag
+      │                                             │
+      │◄──────────────── ACK ──────────────────────│
+      │                                             │
+
+---
+
+# Multiple Receiver Support
+
+The sender can communicate with multiple authorized receivers.
+
+Each receiver can have its own:
+
+- Receiver ID
+- IP address
+- Authentication secret
+- HQC key pair
+- Session key
+
+Conceptually:
+
+                            Sender
+                           │
+             ┌─────────────┼─────────────┐
+             │             │             │
+             ▼             ▼             ▼
+        Receiver 1    Receiver 2    Receiver N
+             │             │             │
+             ▼             ▼             ▼
+          HQC KEM       HQC KEM       HQC KEM
+             │             │             │
+             ▼             ▼             ▼
+        Session K1    Session K2    Session KN
+             │             │             │
+             ▼             ▼             ▼
+           ASCON         ASCON         ASCON
+             │             │             │
+             ▼             ▼             ▼
+           HMAC          HMAC          HMAC
+             │             │             │
+             ▼             ▼             ▼
+        Secure Image  Secure Image  Secure Image
+
+Authentication is performed independently for each authorized receiver.
+
+---
+
+# Configuration
+
+Sensitive configuration information should be stored in a `.env` file.
+
+Example configuration:
+
+    RECEIVER1_IP=<receiver-ip-address>
+    RECEIVER1_KEY=<receiver-authentication-secret>
+
+    RECEIVER2_IP=<receiver-ip-address>
+    RECEIVER2_KEY=<receiver-authentication-secret>
+
+    TCP_PORT=5000
+
+Do not commit the actual `.env` file to the repository.
+
+Use a `.env.example` file to document the required configuration variables without exposing real credentials.
+
+---
+
+# Running the Software
+
+## 1. Start the Receiver
+
+Navigate to the receiver directory:
+
+    cd receiver
+
+Start the receiver:
+
+    python receiver.py
+
+The receiver starts the TCP server and waits for incoming connections.
+
+Example:
+
+    Receiver started
+    Waiting for incoming connection...
+
+---
+
+## 2. Start the Sender
+
+Open another terminal and navigate to the sender directory:
+
+    cd sender
+
+Start the sender:
+
+    python sender.py
+
+The sender then:
+
+1. Loads receiver configuration
+2. Selects the receiver
+3. Establishes a TCP connection
+4. Performs receiver authentication
+5. Performs HQC key establishment
+6. Generates the session key
+7. Encrypts the medical image using ASCON-128
+8. Generates the HMAC
+9. Sends the encrypted packet
+10. Records performance measurements
+
+---
+
+# Image Input and Output
+
+## Input
+
+Medical images to be transmitted should be placed in:
+
+    sender/img/
+
+Example:
+
+    sender/img/
+    ├── patient1.jpg
+    ├── patient2.png
+    └── patient3.jpeg
+
+## Output
+
+Successfully authenticated and verified images are reconstructed and saved in:
+
+    receiver/img/
+
+Example:
+
+    receiver/img/
+    ├── patient1.jpg
+    ├── patient2.png
+    └── patient3.jpeg
+
+The medical image is released only after successful authentication and ASCON verification.
+
+---
+
+# Performance Evaluation
+
+The software implementation measures the execution time of major cryptographic and communication operations.
+
+## Performance Metrics
+
+| Metric | Description | Unit |
+|---|---|---|
+| HQC Key Generation | Time required to generate the HQC key pair | ms |
+| HQC Encapsulation | Time required for HQC encapsulation | ms |
+| HQC Decapsulation | Time required for HQC decapsulation | ms |
+| HMAC Authentication | HMAC computation/verification time | ms |
+| ASCON Encryption | Medical-image encryption time | ms |
+| ASCON Decryption | Medical-image decryption time | ms |
+| Transmission Time | TCP transfer duration | ms |
+| Overall Delay | Total end-to-end latency | ms |
+| Throughput | Data transfer rate | MB/s |
+| Image Size | Medical image file size | MB |
+
+---
+
+# Performance Logs
+
+Performance measurements are automatically stored in CSV files.
+
+## Sender Log
+
+    sender/performance_log.csv
+
+## Receiver Log
+
+    receiver/performance_log_receiver.csv
 
 Example CSV format:
-```csv
-timestamp,image_name,image_size_mb,hqc_keygen_ms,hqc_encap_ms,hmac_auth_ms,ascon_enc_ms,transmission_ms,overall_delay_ms
-2024-01-15T10:30:45,patient1.jpg,2.5,125.3,45.2,8.1,102.5,320.1,601.2
-```
+
+    timestamp,image_name,image_size_mb,hqc_keygen_ms,hqc_encap_ms,hmac_auth_ms,ascon_enc_ms,transmission_ms,overall_delay_ms
+    2026-09-18T10:30:45,patient1.jpg,2.5,125.3,45.2,8.1,102.5,320.1,601.2
+
+The logs can be used to analyze:
+
+- HQC key-generation overhead
+- HQC encapsulation and decapsulation time
+- HMAC processing time
+- ASCON encryption and decryption time
+- TCP transmission time
+- End-to-end latency
+- Throughput
+- Effect of medical-image size on performance
 
 ---
 
-## Security Features
+# Security Features
 
-| Feature | Mechanism | Purpose |
-|---------|-----------|---------|
-| **Confidentiality** | Ascon-128 encryption | Prevent unauthorized image access |
-| **Integrity** | Ascon-128 authentication tag | Detect tampering/corruption |
-| **Receiver Authentication** | HMAC-SHA256 challenge-response | Verify receiver identity |
-| **Replay Resistance** | Fresh random challenge per session | Prevent attack replay |
-| **Post-Quantum Security** | HQC key encapsulation | Quantum-safe key exchange |
-| **Session Key Protection** | Derived (not transmitted) | Prevent key compromise |
-| **Unauthorized Access Prevention** | Failed auth blocks transmission | Enforce access control |
-
----
-
-## Communication Protocol Diagram
-
-```
-SENDER                          RECEIVER
-  │                                │
-  │──── TCP Connection ──────────>│
-  │                                │
-  │─ Receiver ID ────────────────>│
-  │                                │
-  │<─── Challenge Response ───────│ (HMAC-SHA256)
-  │                                │
-  │<─── HQC Public Key ───────────│
-  │                                │
-  │─── HQC Ciphertext ──────────>│
-  │                                │
-  │─── Encrypted Image (TCP) ───>│
-  │     + Nonce + Auth Tag        │
-  │                                │
-  │<─── Acknowledgment ───────────│
-  │                                │
-```
+| Security Feature | Mechanism | Purpose |
+|---|---|---|
+| Confidentiality | ASCON-128 encryption | Protect medical-image contents |
+| Integrity | ASCON authentication tag | Detect modification or corruption |
+| Receiver Authentication | HMAC-SHA256 challenge-response | Verify receiver identity |
+| Identity Binding | Challenge + Receiver ID | Bind authentication to the intended receiver |
+| Replay Resistance | Fresh random challenge | Prevent reuse of previous authentication data |
+| Post-Quantum Key Establishment | HQC KEM | Establish shared secrets using a post-quantum KEM |
+| Session Key Protection | HQC-derived shared secret | Avoid direct transmission of the session key |
+| Unauthorized Access Prevention | Authentication failure blocks transfer | Prevent unauthorized image access |
+| Secure Transport | TCP/IP | Reliable and ordered encrypted-data transmission |
 
 ---
 
-## Limitations
+# Security Testing
 
-This software implementation focuses on **cryptographic and network-security aspects**. The following are outside the scope:
+The implementation can be tested using different security scenarios.
 
-- FPGA resource utilization analysis
--  Hardware power consumption measurement
--  Hardware clock frequency analysis
-- FPGA throughput optimization
+## Valid Receiver
 
-These can be evaluated when deploying to FPGA hardware.
+    Valid Authentication
+            │
+            ▼
+    HQC Key Establishment
+            │
+            ▼
+    ASCON Encryption
+            │
+            ▼
+    HMAC Verification
+            │
+            ▼
+    ASCON Verification
+            │
+            ▼
+    Image Reconstructed
 
----
+## Invalid Authentication Secret
 
-## Future Enhancements
+    Authentication Attempt
+            │
+            ▼
+    HMAC Verification
+            │
+            ▼
+       Authentication
+          Failed
+            │
+            ▼
+       Abort Transfer
+            │
+            ▼
+    Image Not Transmitted
 
-- FPGA acceleration for HQC and Ascon
-- Hardware resource utilization analysis
-  - Power consumption measurement
-- Support for additional medical image formats (JPEG-XR, WebP)
--  Multi-image transmission in single session
-- Enhanced key management infrastructure (PKI)
-- Secure logging and audit trails
-- DICOM medical image standard integration
--  Network optimization and compression
-- Comparison with classical cryptographic schemes (RSA, ECDH)
+## Modified HMAC
 
----
+    Packet Received
+          │
+          ▼
+    HMAC Verification
+          │
+          ▼
+       Mismatch
+          │
+          ▼
+    Packet Discarded
+          │
+          ▼
+    Image Not Decrypted
 
-## Important Security Notes
+## Modified Ciphertext
 
-**Critical Reminders:**
+    Packet Received
+          │
+          ▼
+    HMAC Verification
+          │
+          ▼
+       Valid
+          │
+          ▼
+    ASCON Verification
+          │
+          ▼
+    Integrity Failure
+          │
+          ▼
+    Packet Discarded
 
-1. **Never hard-code secrets** in source code
-2. **Always use environment variables** via `.env` files
-3. **Exclude `.env` files from version control** (add to `.gitignore`)
-4. **Protect `.env` files** with appropriate file permissions (`chmod 600`)
-5. **Do not transmit session keys** directly in network packets
-6. **Use strong authentication secrets** (minimum 32 bytes of entropy)
-7. **Rotate credentials periodically** in production systems
-8. **Never disable authentication checks** for performance
-
----
-
-## Disclaimer
-
-⚖️ This implementation is for **academic and research purposes only**. It demonstrates a prototype secure medical-image transmission architecture and should **NOT** be deployed as a production medical data security system without:
-
-- ✓ Professional security audit
-- ✓ Compliance verification (HIPAA, GDPR, local regulations)
-- ✓ Hardware security module integration
-- ✓ Extended testing in target environment
-- ✓ Legal and compliance review
-
----
-
-## Author & Attribution
-
-**Project:** Authenticated Secure Medical Image Transmission Using HQC and Ascon  
-**Course:** Final Year Electronics and Communication Engineering Project  
-**Institution:** GCE KANNUR
-**Academic Year:** 2023-2027
-
----
-
-## License
-
-This project is licensed under the **MIT License**.
-
-You are free to use, modify, and distribute the software in accordance with the terms of the license.
-
----
-
-## References
-
-1. **Hamming Quasi-Cyclic (HQC) — Key Encapsulation Mechanism**  
-   HQC Specification:  
-   https://www.pqc-hqc.org/doc/hqc-specification_2020-05-29.pdf
-
-2. **NIST Post-Quantum Cryptography — HQC**  
-   https://csrc.nist.gov/projects/post-quantum-cryptography
-
-2. **Ascon-128 AEAD** — Ascon authenticated encryption specification.  
-   https://ascon.iaik.tugraz.at/
-
-3. **Open Quantum Safe (liboqs)** — Open-source library for quantum-safe cryptographic algorithms.  
-   https://github.com/open-quantum-safe/liboqs
-
-4. **HMAC-SHA256** — RFC 2104, *HMAC: Keyed-Hashing for Message Authentication*.  
-   https://www.rfc-editor.org/rfc/rfc2104.html
-
-5. **liboqs-python** — Python bindings for the Open Quantum Safe library.  
-   https://github.com/open-quantum-safe/liboqs-python
-## Support & Questions
-For questions, issues, or technical assistance, please refer to the project repository or contact the project maintainer:
-📧 Email: abhijithk20052@gmail.com
+## Modi
