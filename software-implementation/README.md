@@ -522,61 +522,56 @@ The reconstructed medical image is stored in:
 
 ---
 
-##  Communication Protocol Sequence
+## Communication Protocol Sequence
 
 ```mermaid
 sequenceDiagram
     autonumber
 
-    flowchart TD
+    participant S as Sender
+    participant R as Authorized Receiver
 
-    A["Medical Image Sender"]
-    B["HQC Key Establishment"]
-    C["Shared Session Key K"]
-    D["Generate Fresh Challenge"]
-    E["ASCON-128 AEAD Encryption"]
-    F["Ciphertext C + Authentication Tag T"]
-    G["HMAC-SHA256 Authentication"]
-    H["Secure Packet<br/>{C, T, B, Receiver_ID, N_A}"]
-    I["TCP/IP Transmission"]
+    S->>R: TCP Connection
+    S->>R: Receiver ID
+    S->>R: Fresh Random Challenge
+    R->>S: HMAC-SHA256 Challenge Response
+    S->>S: Verify Receiver Authentication
 
-    R1["Authorized Receiver 1"]
-    R2["Authorized Receiver 2"]
-    RN["Authorized Receiver N"]
+    alt Authentication Failed
+        S-->>R: Abort Communication
+    else Authentication Successful
+        R->>S: HQC Public Key
+        S->>S: HQC Encapsulation
+        S->>R: HQC Ciphertext
+        R->>R: HQC Decapsulation
+        Note over S,R: Shared Session Key K Established
 
-    J["Receiver Authentication"]
-    K{"HMAC Valid?"}
-    L["ASCON-128 Decryption"]
-    M{"ASCON Tag Valid?"}
-    N["Save / Display Medical Image"]
-    X["Discard Packet / Image"]
+        S->>S: A = Challenge || Receiver_ID
+        S->>S: ASCON-128 Encryption
+        S->>S: B = HMAC-SHA256(K_identity, A || T)
+        S->>R: {C, T, B, Receiver_ID, N_A}
 
-    A --> B
-    B --> C
-    C --> D
-    D --> E
-    E --> F
-    F --> G
-    G --> H
-    H --> I
+        R->>R: Reconstruct A
+        R->>R: Verify HMAC
 
-    I --> R1
-    I --> R2
-    I --> RN
+        alt HMAC Invalid
+            R-->>S: Authentication Failed
+            R->>R: Discard Packet
+        else HMAC Valid
+            R->>R: ASCON-128 Decrypt and Verify Tag
 
-    R1 --> J
-    R2 --> J
-    RN --> J
+            alt ASCON Tag Invalid
+                R-->>S: Integrity Verification Failed
+                R->>R: Discard Image
+            else ASCON Tag Valid
+                R->>R: Save Medical Image
+                R-->>S: ACK
+            end
+        end
+    end
+```
 
-    J --> K
-
-    K -->|No| X
-    K -->|Yes| L
-
-    L --> M
-
-    M -->|No| X
-    M -->|Yes| N
+# Multiple Receiver Support
 # Multiple Receiver Support
 
 The sender can communicate with multiple authorized receivers.
