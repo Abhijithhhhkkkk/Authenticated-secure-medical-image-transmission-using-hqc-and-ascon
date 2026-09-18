@@ -522,7 +522,7 @@ The reconstructed medical image is stored in:
 
 ---
 
-# ##  Communication Protocol Sequence
+##  Communication Protocol Sequence
 
 ```mermaid
 sequenceDiagram
