@@ -3,9 +3,11 @@ import hmac
 import os
 import socket
 import struct
+import ctypes
+import time
 
 from dotenv import load_dotenv
-from ascon import decrypt
+
 
 # ============================================================
 # CONFIGURATION
@@ -21,41 +23,194 @@ HMAC_SIZE = 32
 CHALLENGE_SIZE = 32
 ASCON_TAG_SIZE = 16
 
-RECEIVER_ID = os.getenv("RECEIVER_ID", "receiver1")
-IDENTITY_KEY = os.getenv("RECEIVER_KEY", "").encode()
+RECEIVER_ID = os.getenv(
+    "RECEIVER_ID",
+    "receiver1"
+)
+
+IDENTITY_KEY = os.getenv(
+    "RECEIVER_KEY",
+    ""
+).encode()
 
 OUTPUT_FOLDER = "received_images"
-os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+
+os.makedirs(
+    OUTPUT_FOLDER,
+    exist_ok=True
+)
 
 
 # ============================================================
-# HELPERS
+# LOAD C ASCON LIBRARY
+# ============================================================
+
+BASE_DIR = os.path.dirname(
+    os.path.abspath(__file__)
+)
+
+ASCON_LIBRARY = os.path.join(
+    BASE_DIR,
+    "libascon.so"
+)
+
+if not os.path.exists(ASCON_LIBRARY):
+
+    raise FileNotFoundError(
+        f"ASCON library not found: "
+        f"{ASCON_LIBRARY}\n\n"
+        f"Compile it using:\n"
+        f"gcc -O3 -fPIC -shared "
+        f"ascon_wrapper.c -o libascon.so"
+    )
+
+ascon_lib = ctypes.CDLL(
+    ASCON_LIBRARY
+)
+
+
+# ============================================================
+# C ASCON FUNCTION
+# ============================================================
+
+ascon_lib.ascon_decrypt_c.argtypes = [
+    ctypes.POINTER(ctypes.c_ubyte),   # key
+    ctypes.POINTER(ctypes.c_ubyte),   # nonce
+    ctypes.POINTER(ctypes.c_ubyte),   # aad
+    ctypes.c_size_t,                  # aad length
+    ctypes.POINTER(ctypes.c_ubyte),   # ciphertext
+    ctypes.c_size_t,                  # ciphertext length
+    ctypes.POINTER(ctypes.c_ubyte)    # plaintext
+]
+
+ascon_lib.ascon_decrypt_c.restype = ctypes.c_int
+
+
+# ============================================================
+# C ASCON DECRYPTION
+# ============================================================
+
+def ascon_decrypt_c(
+    key,
+    nonce,
+    aad,
+    ciphertext
+):
+
+    if len(ciphertext) < ASCON_TAG_SIZE:
+
+        raise ValueError(
+            "Ciphertext is too short."
+        )
+
+    plaintext_length = (
+        len(ciphertext)
+        - ASCON_TAG_SIZE
+    )
+
+    plaintext = bytearray(
+        plaintext_length
+    )
+
+    key_buffer = (
+        ctypes.c_ubyte * len(key)
+    ).from_buffer_copy(key)
+
+    nonce_buffer = (
+        ctypes.c_ubyte * len(nonce)
+    ).from_buffer_copy(nonce)
+
+    aad_buffer = (
+        ctypes.c_ubyte * len(aad)
+    ).from_buffer_copy(aad)
+
+    ciphertext_buffer = (
+        ctypes.c_ubyte * len(ciphertext)
+    ).from_buffer_copy(ciphertext)
+
+    plaintext_buffer = (
+        ctypes.c_ubyte * len(plaintext)
+    ).from_buffer(plaintext)
+
+    result = ascon_lib.ascon_decrypt_c(
+        key_buffer,
+        nonce_buffer,
+        aad_buffer,
+        len(aad),
+        ciphertext_buffer,
+        len(ciphertext),
+        plaintext_buffer
+    )
+
+    if result != 0:
+
+        raise ValueError(
+            "ASCON authentication "
+            "or decryption failed."
+        )
+
+    return bytes(plaintext)
+
+
+# ============================================================
+# RECEIVE EXACT
 # ============================================================
 
 def recv_exact(sock, size):
-    """Read exactly `size` bytes from `sock`, or return None on EOF."""
-    data = b""
+
+    data = bytearray()
+
     while len(data) < size:
-        chunk = sock.recv(size - len(data))
+
+        chunk = sock.recv(
+            size - len(data)
+        )
+
         if not chunk:
             return None
-        data += chunk
-    return data
+
+        data.extend(chunk)
+
+    return bytes(data)
 
 
-def calculate_hmac(key, data):
-    return hmac.new(key, data, hashlib.sha256).digest()
+# ============================================================
+# HMAC
+# ============================================================
 
+def calculate_hmac(
+    key,
+    data
+):
+
+    return hmac.new(
+        key,
+        data,
+        hashlib.sha256
+    ).digest()
+
+
+# ============================================================
+# SANITIZE PATIENT NAME
+# ============================================================
 
 def sanitize_folder_name(name):
-    """Make a patient name safe to use as a single folder component."""
-    name = name.strip() or "unknown_patient"
 
-    # Strip path separators and other characters that could escape
-    # OUTPUT_FOLDER or break on the filesystem.
-    invalid_chars = '/\\:*?"<>|'
+    name = (
+        name.strip()
+        or "unknown_patient"
+    )
+
+    invalid_chars = (
+        '/\\:*?"<>|'
+    )
+
     for char in invalid_chars:
-        name = name.replace(char, "_")
+
+        name = name.replace(
+            char,
+            "_"
+        )
 
     return name
 
@@ -64,26 +219,32 @@ def sanitize_folder_name(name):
 # AUTHENTICATION
 # ============================================================
 
-def authenticate_receiver(challenge, receiver_id, received_hmac, ascon_tag):
-    receiver_id_bytes = receiver_id.encode()
-    authentication_data = challenge + receiver_id_bytes + ascon_tag
+def authenticate_receiver(
+    challenge,
+    receiver_id,
+    received_hmac,
+    ascon_tag
+):
 
-    expected_hmac = calculate_hmac(IDENTITY_KEY, authentication_data)
+    receiver_id_bytes = (
+        receiver_id.encode()
+    )
 
-    # --- debug ---
-    print("RECV receiver_id :", receiver_id_bytes)
-    print("RECV challenge   :", challenge.hex())
-    print("RECV ascon_tag   :", ascon_tag.hex())
-    print("RECV received_hmac:", received_hmac.hex())
-    print("RECV expected_hmac:", expected_hmac.hex())
-    # -------------
+    authentication_data = (
+        challenge
+        + receiver_id_bytes
+        + ascon_tag
+    )
 
-    if hmac.compare_digest(received_hmac, expected_hmac):
-        print("HMAC authentication successful.")
-        return True
+    expected_hmac = calculate_hmac(
+        IDENTITY_KEY,
+        authentication_data
+    )
 
-    print("HMAC authentication failed.")
-    return False
+    return hmac.compare_digest(
+        received_hmac,
+        expected_hmac
+    )
 
 
 # ============================================================
@@ -91,134 +252,534 @@ def authenticate_receiver(challenge, receiver_id, received_hmac, ascon_tag):
 # ============================================================
 
 def parse_packet(packet):
-    """Unpack the wire format into its component fields."""
+
     offset = 0
 
-    hmac_length = struct.unpack("!B", packet[offset:offset + 1])[0]
+    # --------------------------------------------------------
+    # HMAC
+    # --------------------------------------------------------
+
+    if len(packet) < offset + 1:
+
+        raise ValueError(
+            "Invalid packet."
+        )
+
+    hmac_length = struct.unpack(
+        "!B",
+        packet[
+            offset:
+            offset + 1
+        ]
+    )[0]
+
     offset += 1
 
-    received_hmac = packet[offset:offset + hmac_length]
+    received_hmac = packet[
+        offset:
+        offset + hmac_length
+    ]
+
+    if len(received_hmac) != hmac_length:
+
+        raise ValueError(
+            "Invalid HMAC."
+        )
+
     offset += hmac_length
 
-    key_length = struct.unpack("!B", packet[offset:offset + 1])[0]
+    # --------------------------------------------------------
+    # ASCON KEY
+    # --------------------------------------------------------
+
+    if len(packet) < offset + 1:
+
+        raise ValueError(
+            "Invalid packet."
+        )
+
+    key_length = struct.unpack(
+        "!B",
+        packet[
+            offset:
+            offset + 1
+        ]
+    )[0]
+
     offset += 1
 
-    ascon_key = packet[offset:offset + key_length]
+    ascon_key = packet[
+        offset:
+        offset + key_length
+    ]
+
+    if len(ascon_key) != key_length:
+
+        raise ValueError(
+            "Invalid ASCON key."
+        )
+
     offset += key_length
 
-    nonce = packet[offset:offset + 16]
+    # --------------------------------------------------------
+    # NONCE
+    # --------------------------------------------------------
+
+    if len(packet) < offset + 16:
+
+        raise ValueError(
+            "Invalid nonce."
+        )
+
+    nonce = packet[
+        offset:
+        offset + 16
+    ]
+
     offset += 16
 
-    ciphertext_length = struct.unpack("!I", packet[offset:offset + 4])[0]
+    # --------------------------------------------------------
+    # CIPHERTEXT LENGTH
+    # --------------------------------------------------------
+
+    if len(packet) < offset + 4:
+
+        raise ValueError(
+            "Invalid ciphertext length."
+        )
+
+    ciphertext_length = struct.unpack(
+        "!I",
+        packet[
+            offset:
+            offset + 4
+        ]
+    )[0]
+
     offset += 4
 
-    ciphertext = packet[offset:offset + ciphertext_length]
+    # --------------------------------------------------------
+    # CIPHERTEXT
+    # --------------------------------------------------------
 
-    return received_hmac, ascon_key, nonce, ciphertext
+    if len(packet) < offset + ciphertext_length:
+
+        raise ValueError(
+            "Incomplete ciphertext."
+        )
+
+    ciphertext = packet[
+        offset:
+        offset + ciphertext_length
+    ]
+
+    if len(ciphertext) != ciphertext_length:
+
+        raise ValueError(
+            "Incomplete ciphertext."
+        )
+
+    return (
+        received_hmac,
+        ascon_key,
+        nonce,
+        ciphertext
+    )
 
 
-def extract_payload_fields(plaintext):
-    """Pull patient name / filename / image bytes out of decrypted payload."""
+# ============================================================
+# EXTRACT PAYLOAD
+# ============================================================
+
+def extract_payload_fields(
+    plaintext
+):
+
     offset = 0
 
-    patient_length = struct.unpack("!H", plaintext[offset:offset + 2])[0]
+    # --------------------------------------------------------
+    # PATIENT NAME
+    # --------------------------------------------------------
+
+    if len(plaintext) < offset + 2:
+
+        raise ValueError(
+            "Invalid patient field."
+        )
+
+    patient_length = struct.unpack(
+        "!H",
+        plaintext[
+            offset:
+            offset + 2
+        ]
+    )[0]
+
     offset += 2
-    patient_name = plaintext[offset:offset + patient_length].decode()
+
+    if len(plaintext) < offset + patient_length:
+
+        raise ValueError(
+            "Invalid patient name."
+        )
+
+    patient_name = plaintext[
+        offset:
+        offset + patient_length
+    ].decode(
+        "utf-8"
+    )
+
     offset += patient_length
 
-    filename_length = struct.unpack("!H", plaintext[offset:offset + 2])[0]
+    # --------------------------------------------------------
+    # FILENAME
+    # --------------------------------------------------------
+
+    if len(plaintext) < offset + 2:
+
+        raise ValueError(
+            "Invalid filename field."
+        )
+
+    filename_length = struct.unpack(
+        "!H",
+        plaintext[
+            offset:
+            offset + 2
+        ]
+    )[0]
+
     offset += 2
-    filename = plaintext[offset:offset + filename_length].decode()
+
+    if len(plaintext) < offset + filename_length:
+
+        raise ValueError(
+            "Invalid filename."
+        )
+
+    filename = plaintext[
+        offset:
+        offset + filename_length
+    ].decode(
+        "utf-8"
+    )
+
     offset += filename_length
 
-    image_data = plaintext[offset:]
+    # --------------------------------------------------------
+    # IMAGE DATA
+    # --------------------------------------------------------
 
-    return patient_name, filename, image_data
+    image_data = plaintext[
+        offset:
+    ]
+
+    return (
+        patient_name,
+        filename,
+        image_data
+    )
 
 
 # ============================================================
-# IMAGE RECEPTION
+# RECEIVE IMAGE
 # ============================================================
 
-def receive_image(sock, challenge):
-    packet_length_data = recv_exact(sock, 8)
+def receive_image(
+    sock,
+    challenge
+):
+
+    # --------------------------------------------------------
+    # RECEIVE PACKET LENGTH
+    # --------------------------------------------------------
+
+    packet_length_data = recv_exact(
+        sock,
+        8
+    )
+
     if packet_length_data is None:
         return
 
-    packet_length = struct.unpack("!Q", packet_length_data)[0]
+    packet_length = struct.unpack(
+        "!Q",
+        packet_length_data
+    )[0]
 
-    packet = recv_exact(sock, packet_length)
+    if packet_length == 0:
+        return
+
+    # --------------------------------------------------------
+    # RECEIVE PACKET
+    # --------------------------------------------------------
+
+    packet = recv_exact(
+        sock,
+        packet_length
+    )
+
     if packet is None:
         return
 
-    received_hmac, ascon_key, nonce, ciphertext = parse_packet(packet)
-    ascon_tag = ciphertext[-ASCON_TAG_SIZE:]
-    print("ASCON authentication tag extracted.")
+    # --------------------------------------------------------
+    # PARSE PACKET
+    # --------------------------------------------------------
 
-    # -------- authentication --------
+    try:
+
+        (
+            received_hmac,
+            ascon_key,
+            nonce,
+            ciphertext
+        ) = parse_packet(
+            packet
+        )
+
+    except Exception:
+        return
+
+    if len(ciphertext) < ASCON_TAG_SIZE:
+        return
+
+    # --------------------------------------------------------
+    # EXTRACT ASCON TAG
+    # --------------------------------------------------------
+
+    ascon_tag = (
+        ciphertext[
+            -ASCON_TAG_SIZE:
+        ]
+    )
+
+    # --------------------------------------------------------
+    # AUTHENTICATION
+    # --------------------------------------------------------
+
     authenticated = authenticate_receiver(
-        challenge, RECEIVER_ID, received_hmac, ascon_tag
+        challenge,
+        RECEIVER_ID,
+        received_hmac,
+        ascon_tag
     )
 
     if not authenticated:
-        print("Authentication failed. Image will NOT be decrypted.")
         return
 
-    # -------- decryption --------
-    print("Authentication successful. Starting ASCON decryption...")
+    # --------------------------------------------------------
+    # ASCON DECRYPTION
+    # --------------------------------------------------------
+
     try:
-        plaintext = decrypt(ascon_key, nonce, AAD, ciphertext)
+
+        start_time = time.perf_counter()
+
+        plaintext = ascon_decrypt_c(
+            ascon_key,
+            nonce,
+            AAD,
+            ciphertext
+        )
+
+        elapsed = (
+            time.perf_counter()
+            - start_time
+        )
+
     except Exception:
-        print("ASCON authentication/decryption failed.")
         return
 
-    patient_name, filename, image_data = extract_payload_fields(plaintext)
+    # --------------------------------------------------------
+    # EXTRACT PATIENT / FILE
+    # --------------------------------------------------------
 
-    # One subfolder per patient, named after the patient.
-    patient_folder = os.path.join(OUTPUT_FOLDER, sanitize_folder_name(patient_name))
-    os.makedirs(patient_folder, exist_ok=True)
+    try:
 
-    output_path = os.path.join(patient_folder, filename)
+        (
+            patient_name,
+            filename,
+            image_data
+        ) = extract_payload_fields(
+            plaintext
+        )
 
-    with open(output_path, "wb") as file:
-        file.write(image_data)
+    except Exception:
+        return
 
-    print("\n================================")
-    print("IMAGE RECEIVED SUCCESSFULLY")
-    print("================================")
-    print(f"Patient  : {patient_name}")
-    print(f"Filename : {filename}")
-    print(f"Saved to : {output_path}")
+    # --------------------------------------------------------
+    # PERFORMANCE
+    # --------------------------------------------------------
+
+    image_size_mb = (
+        len(image_data)
+        / (1024 * 1024)
+    )
+
+    decryption_time_ms = (
+        elapsed * 1000
+    )
+
+    if elapsed > 0:
+
+        throughput = (
+            image_size_mb
+            / elapsed
+        )
+
+    else:
+
+        throughput = 0
+
+    # --------------------------------------------------------
+    # SAVE IMAGE
+    # --------------------------------------------------------
+
+    patient_folder = os.path.join(
+        OUTPUT_FOLDER,
+        sanitize_folder_name(
+            patient_name
+        )
+    )
+
+    os.makedirs(
+        patient_folder,
+        exist_ok=True
+    )
+
+    output_path = os.path.join(
+        patient_folder,
+        filename
+    )
+
+    with open(
+        output_path,
+        "wb"
+    ) as file:
+
+        file.write(
+            image_data
+        )
+
+    # --------------------------------------------------------
+    # ONLY PRINT THESE VALUES
+    # --------------------------------------------------------
+
+    print(
+        f"Patient name : {patient_name}"
+    )
+
+    print(
+        f"File name    : {filename}"
+    )
+
+    print(
+        f"Image size   : {image_size_mb:.3f} MB"
+    )
+
+    print(
+        f"Decryption   : {decryption_time_ms:.3f} ms"
+    )
+
+    print(
+        f"Throughput   : {throughput:.3f} MB/s"
+    )
+
+
+# ============================================================
+# HANDLE CHALLENGE
+# ============================================================
+
+def handle_challenge(sock):
+
+    id_length_data = recv_exact(
+        sock,
+        2
+    )
+
+    if id_length_data is None:
+
+        raise ValueError(
+            "Missing receiver ID length."
+        )
+
+    id_length = struct.unpack(
+        "!H",
+        id_length_data
+    )[0]
+
+    received_receiver_id = recv_exact(
+        sock,
+        id_length
+    )
+
+    if received_receiver_id is None:
+
+        raise ValueError(
+            "Missing receiver ID."
+        )
+
+    received_receiver_id = (
+        received_receiver_id.decode(
+            "utf-8"
+        )
+    )
+
+    challenge = recv_exact(
+        sock,
+        CHALLENGE_SIZE
+    )
+
+    if challenge is None:
+
+        raise ValueError(
+            "Missing challenge."
+        )
+
+    return challenge
 
 
 # ============================================================
 # CONNECTION HANDLING
 # ============================================================
 
-def handle_challenge(sock):
-    """Read an 'A' (challenge) message and return (receiver_id, challenge)."""
-    id_length_data = recv_exact(sock, 2)
-    id_length = struct.unpack("!H", id_length_data)[0]
+def handle_connection(
+    sock,
+    challenge
+):
 
-    received_receiver_id = recv_exact(sock, id_length).decode()
-    challenge = recv_exact(sock, CHALLENGE_SIZE)
+    message_type = recv_exact(
+        sock,
+        1
+    )
 
-    print(f"Challenge received for {received_receiver_id}")
-    return challenge
+    if message_type is None:
 
+        return challenge
 
-def handle_connection(sock, challenge):
-    """Process one accepted connection; returns the (possibly updated) challenge."""
-    message_type = recv_exact(sock, 1)
+    # --------------------------------------------------------
+    # CHALLENGE
+    # --------------------------------------------------------
 
     if message_type == b"A":
-        challenge = handle_challenge(sock)
+
+        challenge = handle_challenge(
+            sock
+        )
+
+    # --------------------------------------------------------
+    # IMAGE
+    # --------------------------------------------------------
 
     elif message_type == b"I":
-        if challenge is None:
-            print("No challenge available.")
-        else:
-            receive_image(sock, challenge)
+
+        if challenge is not None:
+
+            receive_image(
+                sock,
+                challenge
+            )
 
     return challenge
 
@@ -228,29 +789,66 @@ def handle_connection(sock, challenge):
 # ============================================================
 
 def main():
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(("0.0.0.0", TCP_PORT))
-    server.listen(5)
 
-    print(f"{RECEIVER_ID} listening on port {TCP_PORT}")
+    server = socket.socket(
+        socket.AF_INET,
+        socket.SOCK_STREAM
+    )
+
+    server.setsockopt(
+        socket.SOL_SOCKET,
+        socket.SO_REUSEADDR,
+        1
+    )
+
+    server.bind(
+        (
+            "0.0.0.0",
+            TCP_PORT
+        )
+    )
+
+    server.listen(5)
 
     challenge = None
 
     try:
+
         while True:
-            sock, address = server.accept()
+
+            sock, address = (
+                server.accept()
+            )
+
             try:
-                challenge = handle_connection(sock, challenge)
-            except Exception as e:
-                print(f"Receiver error: {e}")
+
+                challenge = (
+                    handle_connection(
+                        sock,
+                        challenge
+                    )
+                )
+
+            except Exception:
+                pass
+
             finally:
+
                 sock.close()
+
     except KeyboardInterrupt:
-        print("\nShutting down receiver...")
+
+        pass
+
     finally:
+
         server.close()
 
 
+# ============================================================
+# START
+# ============================================================
+
 if __name__ == "__main__":
+
     main()
