@@ -1,20 +1,14 @@
-# Python
 __pycache__/
 *.py[cod]
 
-# Environment variables
 .env
 
-# Generated files
 *.csv
 *.log
 
-# Input images
 img/
 
-# Python virtual environment
 venv/
 .venv/
 
-# Compiled C library
 *.so
