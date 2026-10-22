@@ -15,12 +15,11 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 # Bidirectional medical-image peer. Every device runs this same script.
+# Session keys come from an HQC KEM exchange (receiver generates the keypair)
+# combined with a pre-shared secret that authenticates the exchange.
 load_dotenv()
 
 DEVICE_ID = os.getenv("DEVICE_ID", "device1").strip()
-# LISTEN_PORT is this device's incoming/receiver port. PEERn_PORT is the
-# remote device's listening port used when this device sends an image.
-# TCP_PORT remains a backwards-compatible default for older .env files.
 LISTEN_PORT = int(os.getenv("LISTEN_PORT", os.getenv("TCP_PORT", "5000")))
 DEFAULT_PEER_PORT = int(os.getenv("TCP_PORT", str(LISTEN_PORT)))
 SOCKET_TIMEOUT = int(os.getenv("SOCKET_TIMEOUT", "30"))
@@ -35,10 +34,11 @@ HMAC_SIZE = 32
 MAX_PACKET_SIZE = int(os.getenv("MAX_PACKET_SIZE", str(512 * 1024 * 1024)))
 PROTOCOL_LABEL = b"medical-image-peer-v1"
 
-# Keep the C wrapper/library beside this script. Expected functions:
+BASE_DIR = Path(__file__).resolve().parent
+
+# ---------------------------------------------------------------- Ascon (C)
 # int ascon_encrypt_c(key, nonce, aad, aad_len, plaintext, plaintext_len, ciphertext)
 # int ascon_decrypt_c(key, nonce, aad, aad_len, ciphertext, ciphertext_len, plaintext)
-BASE_DIR = Path(__file__).resolve().parent
 ASCON_LIBRARY = Path(os.getenv("ASCON_LIBRARY", str(BASE_DIR / "libascon.so")))
 if not ASCON_LIBRARY.exists():
     raise FileNotFoundError(
@@ -52,7 +52,76 @@ ascon_lib.ascon_encrypt_c.restype = ctypes.c_int
 ascon_lib.ascon_decrypt_c.argtypes = [_u8p, _u8p, _u8p, ctypes.c_size_t, _u8p, ctypes.c_size_t, _u8p]
 ascon_lib.ascon_decrypt_c.restype = ctypes.c_int
 
+# ------------------------------------------------------------------ HQC (C)
+# Built from hqc_kem.c: gcc -O3 -fPIC -shared hqc_kem.c -o libhqc.so -loqs
+HQC_LIBRARY = Path(os.getenv("HQC_LIBRARY", str(BASE_DIR / "libhqc.so")))
+HQC_ALG = os.getenv("HQC_ALG", "HQC-128").strip()  # must match on both devices
+if not HQC_LIBRARY.exists():
+    raise FileNotFoundError(
+        f"HQC library not found: {HQC_LIBRARY}\n"
+        "Build with: gcc -O3 -fPIC -shared hqc_kem.c -o libhqc.so -loqs"
+    )
+hqc_lib = ctypes.CDLL(str(HQC_LIBRARY))
+hqc_lib.hqc_init.argtypes = [ctypes.c_char_p]
+hqc_lib.hqc_init.restype = ctypes.c_int
+for _fn in ("hqc_public_key_size", "hqc_secret_key_size", "hqc_ciphertext_size", "hqc_shared_secret_size"):
+    getattr(hqc_lib, _fn).restype = ctypes.c_size_t
+hqc_lib.hqc_keypair.argtypes = [_u8p, _u8p]
+hqc_lib.hqc_keypair.restype = ctypes.c_int
+hqc_lib.hqc_encaps.argtypes = [_u8p, _u8p, _u8p]  # ct, ss, pk
+hqc_lib.hqc_encaps.restype = ctypes.c_int
+hqc_lib.hqc_decaps.argtypes = [_u8p, _u8p, _u8p]  # ss, ct, sk
+hqc_lib.hqc_decaps.restype = ctypes.c_int
 
+if hqc_lib.hqc_init(HQC_ALG.encode()) != 0:
+    raise RuntimeError(f"HQC algorithm {HQC_ALG!r} not available in liboqs")
+HQC_PK_SIZE = hqc_lib.hqc_public_key_size()
+HQC_SK_SIZE = hqc_lib.hqc_secret_key_size()
+HQC_CT_SIZE = hqc_lib.hqc_ciphertext_size()
+HQC_SS_SIZE = hqc_lib.hqc_shared_secret_size()
+
+
+def _cbuf(buf: bytearray):
+    return (ctypes.c_ubyte * len(buf)).from_buffer(buf)
+
+
+def wipe(buf: bytearray):
+    if buf:
+        ctypes.memset(_cbuf(buf), 0, len(buf))
+
+
+def hqc_keypair():
+    pk, sk = bytearray(HQC_PK_SIZE), bytearray(HQC_SK_SIZE)
+    if hqc_lib.hqc_keypair(_cbuf(pk), _cbuf(sk)) != 0:
+        raise RuntimeError("HQC key generation failed")
+    return bytes(pk), sk  # sk stays a bytearray so it can be wiped
+
+
+def hqc_encaps(pk: bytes):
+    if len(pk) != HQC_PK_SIZE:
+        raise ValueError("Bad HQC public key length")
+    ct, ss = bytearray(HQC_CT_SIZE), bytearray(HQC_SS_SIZE)
+    pk_buf = bytearray(pk)
+    if hqc_lib.hqc_encaps(_cbuf(ct), _cbuf(ss), _cbuf(pk_buf)) != 0:
+        raise RuntimeError("HQC encapsulation failed")
+    result = bytes(ct), bytes(ss)
+    wipe(ss)
+    return result
+
+
+def hqc_decaps(ct: bytes, sk: bytearray):
+    if len(ct) != HQC_CT_SIZE:
+        raise ValueError("Bad HQC ciphertext length")
+    ss = bytearray(HQC_SS_SIZE)
+    ct_buf = bytearray(ct)
+    if hqc_lib.hqc_decaps(_cbuf(ss), _cbuf(ct_buf), _cbuf(sk)) != 0:
+        raise RuntimeError("HQC decapsulation failed")
+    result = bytes(ss)
+    wipe(ss)
+    return result
+
+
+# ------------------------------------------------------------------- Peers
 def env_secret(name: str) -> bytes:
     value = os.getenv(name, "").strip()
     if not value:
@@ -67,7 +136,6 @@ def env_secret(name: str) -> bytes:
 
 
 # Configure peers with PEER1_ID, PEER1_IP, PEER1_SHARED_SECRET, PEER2_..., etc.
-# For backward compatibility, PEER1_SHARED_SECRET can fall back to RECEIVER1_KEY.
 def load_peers():
     peers = {}
     for index in range(1, 33):
@@ -76,7 +144,6 @@ def load_peers():
         secret = env_secret(f"PEER{index}_SHARED_SECRET")
         if not secret:
             secret = env_secret(f"RECEIVER{index}_KEY")
-        # The original receiver code used RECEIVER_KEY for its configured peer.
         if not secret and index == 1:
             secret = env_secret("RECEIVER_KEY")
         if not peer_id and not peer_ip and not secret:
@@ -107,6 +174,7 @@ def load_peers():
 PEERS = load_peers()
 
 
+# --------------------------------------------------------------- Key schedule
 def hkdf_expand(prk: bytes, info: bytes, length: int) -> bytes:
     output = bytearray()
     previous = b""
@@ -118,12 +186,27 @@ def hkdf_expand(prk: bytes, info: bytes, length: int) -> bytes:
     return bytes(output[:length])
 
 
-def derive_session_keys(shared_secret: bytes, challenge: bytes, id_a: str, id_b: str):
-    # Stable identity ordering ensures both sides derive the same keys regardless of direction.
+def _context(id_a: str, id_b: str) -> bytes:
+    # Stable identity ordering: both sides derive the same keys regardless of direction.
     first, second = sorted((id_a.encode("utf-8"), id_b.encode("utf-8")))
-    salt = hashlib.sha256(PROTOCOL_LABEL + challenge).digest()
+    return PROTOCOL_LABEL + struct.pack("!H", len(first)) + first + struct.pack("!H", len(second)) + second
+
+
+def derive_auth_key(shared_secret: bytes, challenge: bytes, id_a: str, id_b: str) -> bytes:
+    # PSK-only key: authenticates the HQC public key and ciphertext.
+    salt = hashlib.sha256(PROTOCOL_LABEL + b"auth" + challenge).digest()
     prk = hmac.new(salt, shared_secret, hashlib.sha256).digest()
-    context = PROTOCOL_LABEL + struct.pack("!H", len(first)) + first + struct.pack("!H", len(second)) + second
+    return hkdf_expand(prk, b"auth-key\x00" + _context(id_a, id_b), HMAC_SIZE)
+
+
+def derive_session_keys(shared_secret: bytes, kem_ss: bytes, challenge: bytes,
+                        pk: bytes, ct: bytes, id_a: str, id_b: str):
+    # Keys depend on the HQC secret, the PSK, and the full KEM transcript.
+    salt = hashlib.sha256(
+        PROTOCOL_LABEL + challenge + hashlib.sha256(pk).digest() + hashlib.sha256(ct).digest()
+    ).digest()
+    prk = hmac.new(salt, kem_ss + shared_secret, hashlib.sha256).digest()
+    context = _context(id_a, id_b)
     ascon_key = hkdf_expand(prk, b"ascon-key\x00" + context, ASCON_KEY_SIZE)
     hmac_key = hkdf_expand(prk, b"hmac-key\x00" + context, HMAC_SIZE)
     return ascon_key, hmac_key
@@ -133,6 +216,7 @@ def calculate_hmac(key: bytes, data: bytes) -> bytes:
     return hmac.new(key, data, hashlib.sha256).digest()
 
 
+# ------------------------------------------------------------------- Ascon
 def _buffer(data: bytes):
     # ctypes cannot create a zero-length buffer reliably; use a one-byte placeholder.
     raw = data if data else b"\x00"
@@ -165,6 +249,7 @@ def ascon_decrypt(key: bytes, nonce: bytes, aad: bytes, ciphertext: bytes) -> by
     return bytes(plaintext)
 
 
+# ------------------------------------------------------------------ Framing
 def send_frame(sock: socket.socket, payload: bytes):
     if len(payload) > MAX_PACKET_SIZE:
         raise ValueError("Packet exceeds configured maximum size")
@@ -219,8 +304,6 @@ def make_proof(label: bytes, key: bytes, challenge: bytes, sender_id: str, recei
 
 
 def build_payload(image_path: Path, patient_name: str) -> bytes:
-    patient_bytes = patient_name.encode("utf-8")
-    filename_bytes = image_path.name.encode("utf-8")
     image_bytes = image_path.read_bytes()
     if not image_bytes:
         raise ValueError("Image file is empty")
@@ -247,6 +330,13 @@ def sanitize_folder_name(name: str) -> str:
     return name or "unknown_patient"
 
 
+# ------------------------------------------------------------------- Sender
+# Handshake:
+#   S -> R : H | sender_id | receiver_id
+#   R -> S : C | challenge | HQC_pk | tag_pk
+#   S -> R : K | HQC_ct | tag_ct
+#   R -> S : R | server_proof
+#   S -> R : I | nonce | len | Ascon ciphertext | HMAC
 def send_image_to_peer(image_path: Path, peer_id: str, patient_name: str):
     peer = PEERS[peer_id]
     shared_secret = peer["secret"]
@@ -257,17 +347,30 @@ def send_image_to_peer(image_path: Path, peer_id: str, patient_name: str):
         send_frame(sock, hello)
 
         challenge_packet = recv_frame(sock)
-        if not challenge_packet or len(challenge_packet) != 1 + CHALLENGE_SIZE or challenge_packet[:1] != b"C":
-            raise ValueError("Invalid challenge from peer")
-        challenge = challenge_packet[1:]
-        ascon_key, hmac_key = derive_session_keys(shared_secret, challenge, DEVICE_ID, peer_id)
+        if (not challenge_packet or challenge_packet[:1] != b"C"
+                or len(challenge_packet) != 1 + CHALLENGE_SIZE + HQC_PK_SIZE + HMAC_SIZE):
+            raise ValueError("Invalid challenge/public-key packet from peer")
+        challenge = challenge_packet[1:1 + CHALLENGE_SIZE]
+        peer_pk = challenge_packet[1 + CHALLENGE_SIZE:1 + CHALLENGE_SIZE + HQC_PK_SIZE]
+        pk_tag = challenge_packet[-HMAC_SIZE:]
 
-        client_proof = make_proof(b"client-proof-v1", hmac_key, challenge, DEVICE_ID, peer_id)
-        send_frame(sock, b"P" + client_proof)
+        auth_key = derive_auth_key(shared_secret, challenge, DEVICE_ID, peer_id)
+        expected_pk_tag = calculate_hmac(auth_key, b"server-hello-v1" + challenge + peer_pk)
+        if not hmac.compare_digest(pk_tag, expected_pk_tag):
+            raise PermissionError("Peer public key authentication failed")
+
+        kem_start = time.perf_counter()
+        kem_ct, kem_ss = hqc_encaps(peer_pk)
+        kem_elapsed = time.perf_counter() - kem_start
+        ct_tag = calculate_hmac(auth_key, b"client-kem-v1" + challenge + peer_pk + kem_ct)
+        send_frame(sock, b"K" + kem_ct + ct_tag)
+
+        ascon_key, hmac_key = derive_session_keys(
+            shared_secret, kem_ss, challenge, peer_pk, kem_ct, DEVICE_ID, peer_id)
 
         server_proof_packet = recv_frame(sock)
         expected_server_proof = make_proof(b"server-proof-v1", hmac_key, challenge, DEVICE_ID, peer_id)
-        if not server_proof_packet or server_proof_packet != b"R" + expected_server_proof:
+        if not server_proof_packet or not hmac.compare_digest(server_proof_packet, b"R" + expected_server_proof):
             raise PermissionError("Peer authentication failed")
 
         payload = build_payload(image_path, patient_name)
@@ -290,12 +393,15 @@ def send_image_to_peer(image_path: Path, peer_id: str, patient_name: str):
     print(f"File name            : {image_path.name}")
     print(f"Patient name         : {patient_name}")
     print(f"Image size           : {size_mb:.3f} MB")
+    print(f"KEM algorithm        : {HQC_ALG}")
+    print(f"HQC encaps time      : {kem_elapsed * 1000:.3f} ms")
     print(f"Encryption time      : {encrypt_elapsed * 1000:.3f} ms")
     print(f"Encryption throughput: {size_mb / encrypt_elapsed:.3f} MB/s" if encrypt_elapsed > 0 else "Encryption throughput: 0.000 MB/s")
     print(f"Overall send delay   : {(time.perf_counter() - start_overall) * 1000:.3f} ms")
     print("Image transmission completed.")
 
 
+# ----------------------------------------------------------------- Receiver
 def handle_incoming_connection(sock: socket.socket, address):
     sock.settimeout(SOCKET_TIMEOUT)
     try:
@@ -313,14 +419,30 @@ def handle_incoming_connection(sock: socket.socket, address):
 
         shared_secret = PEERS[sender_id]["secret"]
         challenge = secrets.token_bytes(CHALLENGE_SIZE)
-        send_frame(sock, b"C" + challenge)
-        ascon_key, hmac_key = derive_session_keys(shared_secret, challenge, sender_id, receiver_id)
 
-        proof_packet = recv_frame(sock)
-        expected_client_proof = make_proof(b"client-proof-v1", hmac_key, challenge, sender_id, receiver_id)
-        if proof_packet != b"P" + expected_client_proof:
-            raise PermissionError("Sender authentication failed")
+        # Fresh HQC keypair for this connection; public key is sent with the challenge.
+        hqc_pk, hqc_sk = hqc_keypair()
+        try:
+            auth_key = derive_auth_key(shared_secret, challenge, sender_id, receiver_id)
+            pk_tag = calculate_hmac(auth_key, b"server-hello-v1" + challenge + hqc_pk)
+            send_frame(sock, b"C" + challenge + hqc_pk + pk_tag)
 
+            kem_packet = recv_frame(sock)
+            if (not kem_packet or kem_packet[:1] != b"K"
+                    or len(kem_packet) != 1 + HQC_CT_SIZE + HMAC_SIZE):
+                raise ValueError("Invalid KEM packet")
+            kem_ct = kem_packet[1:1 + HQC_CT_SIZE]
+            ct_tag = kem_packet[-HMAC_SIZE:]
+            expected_ct_tag = calculate_hmac(auth_key, b"client-kem-v1" + challenge + hqc_pk + kem_ct)
+            if not hmac.compare_digest(ct_tag, expected_ct_tag):
+                raise PermissionError("Sender authentication failed")
+
+            kem_ss = hqc_decaps(kem_ct, hqc_sk)
+        finally:
+            wipe(hqc_sk)  # secret key is no longer needed after decapsulation
+
+        ascon_key, hmac_key = derive_session_keys(
+            shared_secret, kem_ss, challenge, hqc_pk, kem_ct, sender_id, receiver_id)
         server_proof = make_proof(b"server-proof-v1", hmac_key, challenge, sender_id, receiver_id)
         send_frame(sock, b"R" + server_proof)
 
@@ -370,6 +492,11 @@ def handle_incoming_connection(sock: socket.socket, address):
     except Exception as exc:
         # Do not expose keys, proofs, challenges, or raw packet contents.
         print(f"Incoming transfer from {address[0]} rejected/failed: {exc}")
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
 
 
 def server_loop():
@@ -377,7 +504,7 @@ def server_loop():
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("0.0.0.0", LISTEN_PORT))
     server.listen(16)
-    print(f"[{DEVICE_ID}] Listening for incoming transfers on TCP port {LISTEN_PORT}")
+    print(f"[{DEVICE_ID}] Listening for incoming transfers on TCP port {LISTEN_PORT} ({HQC_ALG})")
     try:
         while True:
             conn, address = server.accept()
@@ -386,6 +513,7 @@ def server_loop():
         server.close()
 
 
+# ------------------------------------------------------------ Folder watcher
 class UploadHandler(FileSystemEventHandler):
     def __init__(self, upload_queue):
         self.upload_queue = upload_queue
@@ -461,6 +589,7 @@ def main():
     IMAGE_FOLDER.mkdir(parents=True, exist_ok=True)
     OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
     print(f"Device ID : {DEVICE_ID}")
+    print(f"KEM       : {HQC_ALG} (pk {HQC_PK_SIZE} B, ct {HQC_CT_SIZE} B)")
     print(f"Watch folder: {IMAGE_FOLDER}")
     print(f"Receive folder: {OUTPUT_FOLDER}")
     if not PEERS:
