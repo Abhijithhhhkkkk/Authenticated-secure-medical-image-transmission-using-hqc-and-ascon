@@ -1,3 +1,4 @@
+import csv
 import ctypes
 import hashlib
 import hmac
@@ -33,8 +34,119 @@ ASCON_TAG_SIZE = 16
 HMAC_SIZE = 32
 MAX_PACKET_SIZE = int(os.getenv("MAX_PACKET_SIZE", str(512 * 1024 * 1024)))
 PROTOCOL_LABEL = b"medical-image-peer-v1"
+filename_sender = "performance_sender.csv"
+filename_receiver = "performance_receiver.csv"
 
 BASE_DIR = Path(__file__).resolve().parent
+
+
+# ------------------------------------------------- CSV logging + energy meter
+CSV_LOCK = threading.Lock()
+
+
+
+def append_csv(filename, header, row):
+    path = Path(filename)
+
+    with CSV_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Check an existing CSV's header before appending.
+        if path.exists() and path.stat().st_size > 0:
+            with path.open("r", newline="", encoding="utf-8") as f:
+                existing_header = next(csv.reader(f), [])
+
+            if existing_header != header:
+                raise ValueError(
+                    f"CSV header mismatch in {path}.\n"
+                    f"Existing header: {existing_header}\n"
+                    f"Expected header: {header}\n"
+                    "Back up or rename the old CSV before continuing."
+                )
+
+        new_file = not path.exists() or path.stat().st_size == 0
+
+        with path.open("a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+
+            if new_file:
+                writer.writerow(header)
+
+            if len(row) != len(header):
+                raise ValueError(
+                    f"CSV row has {len(row)} values but "
+                    f"the header has {len(header)} columns."
+                )
+
+            writer.writerow(row)
+
+
+
+class EnergyMeter:
+    """CPU package energy via Intel RAPL (Linux x86).
+
+    Usage:
+        with EnergyMeter() as m:
+            ... work ...
+        m.joules  -> energy in J (None if RAPL is unavailable)
+        m.avg_watts -> average power over the block
+
+    May need: sudo chmod -R a+r /sys/class/powercap/intel-rapl*
+    Measures the whole CPU package, so background load is included.
+    For short operations, repeat many times or subtract an idle baseline.
+    """
+    PATH = Path("/sys/class/powercap/intel-rapl:0")
+
+    def __init__(self):
+        self.joules = None
+        self.avg_watts = None
+        self.ok = False
+        try:
+            self.max_uj = int((self.PATH / "max_energy_range_uj").read_text())
+            self._read()
+            self.ok = True
+        except (OSError, ValueError):
+            self.ok = False
+
+    def _read(self):
+        return int((self.PATH / "energy_uj").read_text())
+
+    def __enter__(self):
+        return self.start()
+
+    def __exit__(self, *exc):
+        self.stop()
+
+    def start(self):
+        self.joules = None
+        self.avg_watts = None
+        if self.ok:
+            try:
+                self.t0, self.e0 = time.perf_counter(), self._read()
+            except (OSError, ValueError):
+                self.ok = False
+        return self
+
+    def stop(self):
+        if self.ok:
+            try:
+                e1, dt = self._read(), time.perf_counter() - self.t0
+            except (OSError, ValueError):
+                return
+            delta = e1 - self.e0
+            if delta < 0:
+                delta += self.max_uj  # counter wrapped
+            self.joules = delta / 1e6
+            self.avg_watts = self.joules / dt if dt > 0 else 0.0
+
+
+def fmt_energy(meter):
+    return round(meter.joules, 6) if meter.joules is not None else "N/A"
+
+
+def fmt_energy_text(meter):
+    return f"{meter.joules:.6f} J" if meter.joules is not None else "N/A (RAPL unavailable)"
+
 
 # ---------------------------------------------------------------- Ascon (C)
 # int ascon_encrypt_c(key, nonce, aad, aad_len, plaintext, plaintext_len, ciphertext)
@@ -340,9 +452,11 @@ def sanitize_folder_name(name: str) -> str:
 def send_image_to_peer(image_path: Path, peer_id: str, patient_name: str):
     peer = PEERS[peer_id]
     shared_secret = peer["secret"]
+    energy = EnergyMeter().start()  # overall energy for the whole transfer
     start_overall = time.perf_counter()
     with socket.create_connection((peer["ip"], peer["port"]), timeout=SOCKET_TIMEOUT) as sock:
         sock.settimeout(SOCKET_TIMEOUT)
+
         hello = b"H" + pack_text(DEVICE_ID) + pack_text(peer_id)
         send_frame(sock, hello)
 
@@ -386,24 +500,46 @@ def send_image_to_peer(image_path: Path, peer_id: str, patient_name: str):
             b"image-packet-v1" + challenge + pack_text(DEVICE_ID) + pack_text(peer_id) + nonce + ciphertext,
         )
         image_packet = b"I" + nonce + struct.pack("!Q", len(ciphertext)) + ciphertext + packet_mac
+        latency_start = time.perf_counter()
         send_frame(sock, image_packet)
+        ack = recv_frame(sock)  # receiver confirms the image was verified, decrypted and saved
+        latency_elapsed = time.perf_counter() - latency_start  # image delivery latency
+        if ack != b"A":
+            raise PermissionError("Receiver did not acknowledge the image")
 
+    energy.stop()
+    overall_elapsed = time.perf_counter() - start_overall
     size_mb = len(payload) / (1024 * 1024)
-    print("\n========== ASCON PERFORMANCE ==========")
+    throughput = size_mb / encrypt_elapsed if encrypt_elapsed > 0 else 0.0
+
+    print("\n========== ASCON PERFORMANCE (SENDER) ==========")
     print(f"File name            : {image_path.name}")
     print(f"Patient name         : {patient_name}")
     print(f"Image size           : {size_mb:.3f} MB")
     print(f"KEM algorithm        : {HQC_ALG}")
     print(f"HQC encaps time      : {kem_elapsed * 1000:.3f} ms")
     print(f"Encryption time      : {encrypt_elapsed * 1000:.3f} ms")
-    print(f"Encryption throughput: {size_mb / encrypt_elapsed:.3f} MB/s" if encrypt_elapsed > 0 else "Encryption throughput: 0.000 MB/s")
-    print(f"Overall send delay   : {(time.perf_counter() - start_overall) * 1000:.3f} ms")
+    print(f"Encryption throughput: {throughput:.3f} MB/s")
+    print(f"Delivery latency     : {latency_elapsed * 1000:.3f} ms")
+    print(f"Overall send delay   : {overall_elapsed * 1000:.3f} ms")
+    print(f"Overall energy       : {fmt_energy_text(energy)}")
     print("Image transmission completed.")
+
+    append_csv(
+        filename_sender,
+        ["Image size (MB)", "HQC encaps time (ms)", "Encryption time (ms)",
+         "Throughput (MB/s)", "Latency (ms)", "Overall delay (ms)", "Overall energy (J)"],
+        [round(size_mb, 3), round(kem_elapsed * 1000, 3), round(encrypt_elapsed * 1000, 3),
+         round(throughput, 3), round(latency_elapsed * 1000, 3), round(overall_elapsed * 1000, 3),
+         fmt_energy(energy)],
+    )
 
 
 # ----------------------------------------------------------------- Receiver
 def handle_incoming_connection(sock: socket.socket, address):
     sock.settimeout(SOCKET_TIMEOUT)
+    energy = EnergyMeter().start()  # overall energy for the whole transfer
+    start_overall = time.perf_counter()  # overall delay starts when the connection is handled
     try:
         hello = recv_frame(sock)
         if not hello or not hello.startswith(b"H"):
@@ -437,7 +573,9 @@ def handle_incoming_connection(sock: socket.socket, address):
             if not hmac.compare_digest(ct_tag, expected_ct_tag):
                 raise PermissionError("Sender authentication failed")
 
+            decaps_start = time.perf_counter()
             kem_ss = hqc_decaps(kem_ct, hqc_sk)
+            decaps_elapsed = time.perf_counter() - decaps_start  # HQC decapsulation time
         finally:
             wipe(hqc_sk)  # secret key is no longer needed after decapsulation
 
@@ -479,16 +617,32 @@ def handle_incoming_connection(sock: socket.socket, address):
         temp_path = output_path.with_name(output_path.name + ".part")
         temp_path.write_bytes(image_data)
         temp_path.replace(output_path)
+        send_frame(sock, b"A")  # delivery acknowledgement for the sender's latency measurement
 
+        energy.stop()
+        overall_elapsed = time.perf_counter() - start_overall  # overall receive delay
         size_mb = len(image_data) / (1024 * 1024)
+        throughput = size_mb / decrypt_elapsed if decrypt_elapsed > 0 else 0.0
+
         print("\n========== IMAGE RECEIVED ==========")
         print(f"Sender               : {sender_id}")
         print(f"Patient name         : {patient_name}")
         print(f"File name            : {filename}")
         print(f"Image size           : {size_mb:.3f} MB")
+        print(f"HQC decaps time      : {decaps_elapsed * 1000:.3f} ms")
         print(f"Decryption time      : {decrypt_elapsed * 1000:.3f} ms")
-        print(f"Decryption throughput: {size_mb / decrypt_elapsed:.3f} MB/s" if decrypt_elapsed > 0 else "Decryption throughput: 0.000 MB/s")
+        print(f"Decryption throughput: {throughput:.3f} MB/s")
+        print(f"Overall receive delay: {overall_elapsed * 1000:.3f} ms")
+        print(f"Overall energy       : {fmt_energy_text(energy)}")
         print(f"Saved to             : {output_path}")
+
+        append_csv(
+            filename_receiver,
+            ["Image size (MB)", "HQC decaps time (ms)", "Decryption time (ms)",
+             "Throughput (MB/s)", "Overall delay (ms)", "Overall energy (J)"],
+            [round(size_mb, 3), round(decaps_elapsed * 1000, 3), round(decrypt_elapsed * 1000, 3),
+             round(throughput, 3), round(overall_elapsed * 1000, 3), fmt_energy(energy)],
+        )
     except Exception as exc:
         # Do not expose keys, proofs, challenges, or raw packet contents.
         print(f"Incoming transfer from {address[0]} rejected/failed: {exc}")
@@ -592,6 +746,7 @@ def main():
     print(f"KEM       : {HQC_ALG} (pk {HQC_PK_SIZE} B, ct {HQC_CT_SIZE} B)")
     print(f"Watch folder: {IMAGE_FOLDER}")
     print(f"Receive folder: {OUTPUT_FOLDER}")
+    print(f"Energy meter (RAPL): {'available' if EnergyMeter().ok else 'not available - energy columns will show N/A'}")
     if not PEERS:
         print("WARNING: no peers configured; incoming connections will be rejected")
 
