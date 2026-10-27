@@ -14,7 +14,7 @@ integration, performance evaluation, and final documentation.
 |---|---|---|
 | 1 ✅| Requirement Analysis | Literature survey and technology study |
 | 2 ✅| Authentication | User and receiver authentication |
-| 3|  HQC KEM | Key generation, encapsulation, decapsulation |
+| 3✅|  HQC KEM | Key generation, encapsulation, decapsulation |
 | 4 ✅| ASCON | Image encryption and decryption |
 | 5 ✅| Secure Communication | TCP/IP and multi-receiver transmission |
 | 6 | FPGA Acceleration | FPGA symmetric-encryption implementation |
